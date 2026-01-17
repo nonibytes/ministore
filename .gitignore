@@ -4,7 +4,8 @@
 *.dll
 *.so
 *.dylib
-/ministore
+# Compiled CLI binary
+/ministore-cli
 cmd/ministore/ministore
 
 # Test binary, built with `go test -c`

@@ -1,0 +1,22 @@
+{
+  "fields": {
+    "title": {
+      "type": "text",
+      "weight": 3.0
+    },
+    "tags": {
+      "type": "keyword",
+      "multi": true
+    },
+    "category": {
+      "type": "keyword"
+    },
+    "priority": {
+      "type": "number"
+    },
+    "content": {
+      "type": "text",
+      "weight": 1.0
+    }
+  }
+}
