@@ -1,5 +1,7 @@
 package sqlbuilder
 
+import "sort"
+
 type PlaceholderStyle int
 
 const (
@@ -42,4 +44,9 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+// SortStrings sorts a slice of strings in place
+func SortStrings(s []string) {
+	sort.Strings(s)
 }

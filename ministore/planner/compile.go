@@ -12,8 +12,8 @@ type CompileOutput struct {
 	CTEs            []CTE
 	ResultCTE       string
 	ExplainSteps    []string
-	TextPreds       []TextPredicate
-	RequiresFTSJoin bool
+	TextPreds       []storage.TextPredicate // positive-context only, for scoring
+	RequiresFTSJoin bool                    // query evaluation needs FTS
 }
 
 // CTE represents a Common Table Expression
@@ -22,33 +22,33 @@ type CTE struct {
 	SQL  string
 }
 
-// TextPredicate represents a text search predicate for scoring
-type TextPredicate struct {
-	Field *string
-	Query string
-}
-
 // Compiler compiles query expressions to CTEs
 type Compiler struct {
+	adapter         storage.Adapter
+	fts             storage.FTS
+	backend         storage.Backend
 	schema          storage.Schema
 	builder         storage.Builder
 	nowMS           int64
 	ctes            []CTE
 	explainSteps    []string
 	cteCounter      int
-	textPreds       []TextPredicate
+	textPreds       []storage.TextPredicate
 	requiresFTSJoin bool
 }
 
-// Compile compiles a query expression into CTEs
-func Compile(schema storage.Schema, builder storage.Builder, expr query.Expr, nowMS int64) (*CompileOutput, error) {
+// Compile compiles a query expression into CTEs.
+func Compile(adapter storage.Adapter, schema storage.Schema, builder storage.Builder, expr query.Expr, nowMS int64) (*CompileOutput, error) {
 	c := &Compiler{
+		adapter: adapter,
+		fts:     adapter.FTS(),
+		backend: adapter.Backend(),
 		schema:  schema,
 		builder: builder,
 		nowMS:   nowMS,
 	}
 
-	resultCTE, err := c.compileExpr(expr)
+	resultCTE, err := c.compileExpr(expr, true /*positive*/)
 	if err != nil {
 		return nil, err
 	}
@@ -68,14 +68,14 @@ func (c *Compiler) nextCTEName() string {
 	return name
 }
 
-func (c *Compiler) compileExpr(expr query.Expr) (string, error) {
+func (c *Compiler) compileExpr(expr query.Expr, positive bool) (string, error) {
 	switch e := expr.(type) {
 	case query.And:
-		leftName, err := c.compileExpr(e.Left)
+		leftName, err := c.compileExpr(e.Left, positive)
 		if err != nil {
 			return "", err
 		}
-		rightName, err := c.compileExpr(e.Right)
+		rightName, err := c.compileExpr(e.Right, positive)
 		if err != nil {
 			return "", err
 		}
@@ -87,11 +87,11 @@ func (c *Compiler) compileExpr(expr query.Expr) (string, error) {
 		return resultName, nil
 
 	case query.Or:
-		leftName, err := c.compileExpr(e.Left)
+		leftName, err := c.compileExpr(e.Left, positive)
 		if err != nil {
 			return "", err
 		}
-		rightName, err := c.compileExpr(e.Right)
+		rightName, err := c.compileExpr(e.Right, positive)
 		if err != nil {
 			return "", err
 		}
@@ -103,7 +103,7 @@ func (c *Compiler) compileExpr(expr query.Expr) (string, error) {
 		return resultName, nil
 
 	case query.Not:
-		innerName, err := c.compileExpr(e.Inner)
+		innerName, err := c.compileExpr(e.Inner, false /*positive*/)
 		if err != nil {
 			return "", err
 		}
@@ -115,14 +115,14 @@ func (c *Compiler) compileExpr(expr query.Expr) (string, error) {
 		return resultName, nil
 
 	case query.Pred:
-		return c.compilePredicate(e.Predicate)
+		return c.compilePredicate(e.Predicate, positive)
 
 	default:
 		return "", fmt.Errorf("unknown expression type: %T", expr)
 	}
 }
 
-func (c *Compiler) compilePredicate(pred query.Predicate) (string, error) {
+func (c *Compiler) compilePredicate(pred query.Predicate, positive bool) (string, error) {
 	switch p := pred.(type) {
 	case query.Has:
 		if !c.schema.HasField(p.Field) {
@@ -137,19 +137,23 @@ func (c *Compiler) compilePredicate(pred query.Predicate) (string, error) {
 
 	case query.PathGlob:
 		resultName := c.nextCTEName()
-		var sql string
-
-		// Prefix-only optimization: "/docs/*" => LIKE "/docs/%"
 		pattern := p.Pattern
 		prefix := literalPrefixBeforeWildcard(pattern)
+
+		var sql string
 		if pattern == prefix+"*" {
 			// Pure prefix pattern
 			ph := c.builder.Arg(prefix + "%")
 			sql = fmt.Sprintf("SELECT id AS item_id FROM items WHERE path LIKE %s", ph)
 		} else {
-			// Use GLOB for more complex patterns
-			ph := c.builder.Arg(pattern)
-			sql = fmt.Sprintf("SELECT id AS item_id FROM items WHERE path GLOB %s", ph)
+			if c.backend == storage.BackendSQLite {
+				ph := c.builder.Arg(pattern)
+				sql = fmt.Sprintf("SELECT id AS item_id FROM items WHERE path GLOB %s", ph)
+			} else {
+				like := globToLike(pattern)
+				ph := c.builder.Arg(like)
+				sql = fmt.Sprintf("SELECT id AS item_id FROM items WHERE path LIKE %s ESCAPE '\\'", ph)
+			}
 		}
 
 		c.ctes = append(c.ctes, CTE{Name: resultName, SQL: sql})
@@ -157,10 +161,10 @@ func (c *Compiler) compilePredicate(pred query.Predicate) (string, error) {
 		return resultName, nil
 
 	case query.Keyword:
-		return c.compileKeyword(p)
+		return c.compileKeyword(p, positive)
 
 	case query.Text:
-		return c.compileText(p)
+		return c.compileText(p, positive)
 
 	case query.NumberCmp:
 		// Handle implicit created/updated fields (timestamps as numbers)
@@ -266,7 +270,7 @@ func (c *Compiler) compilePredicate(pred query.Predicate) (string, error) {
 	}
 }
 
-func (c *Compiler) compileKeyword(p query.Keyword) (string, error) {
+func (c *Compiler) compileKeyword(p query.Keyword, positive bool) (string, error) {
 	// Handle implicit created/updated fields
 	if p.Field == "created" || p.Field == "updated" {
 		if p.Kind != query.KeywordExact {
@@ -296,12 +300,12 @@ func (c *Compiler) compileKeyword(p query.Keyword) (string, error) {
 
 	// If schema says this is a TEXT field, treat field:term as FTS query
 	if spec.Type == storage.FieldType("text") {
-		return c.compileText(query.Text{Field: &p.Field, FTS: p.Pattern})
+		return c.compileText(query.Text{Field: &p.Field, FTS: p.Pattern}, positive)
 	}
 
 	// Bool fields: accept true/false via field:...
 	if spec.Type == storage.FieldType("bool") && (p.Pattern == "true" || p.Pattern == "false") {
-		return c.compilePredicate(query.Bool{Field: p.Field, Value: p.Pattern == "true"})
+		return c.compilePredicate(query.Bool{Field: p.Field, Value: p.Pattern == "true"}, positive)
 	}
 
 	// Date fields: support equality via field:YYYY-MM-DD (exact only)
@@ -321,28 +325,30 @@ func (c *Compiler) compileKeyword(p query.Keyword) (string, error) {
 	}
 
 	resultName := c.nextCTEName()
-	var sql string
-
 	phField := c.builder.Arg(p.Field)
 
+	var sql string
 	switch p.Kind {
 	case query.KeywordExact:
 		phVal := c.builder.Arg(p.Pattern)
 		sql = fmt.Sprintf("SELECT p.item_id FROM kw_dict d JOIN kw_postings p ON p.value_id = d.id WHERE d.field = %s AND d.value = %s", phField, phVal)
-
 	case query.KeywordPrefix:
 		prefix := p.Pattern[:len(p.Pattern)-1] // remove trailing *
 		phVal := c.builder.Arg(prefix + "%")
 		sql = fmt.Sprintf("SELECT p.item_id FROM kw_dict d JOIN kw_postings p ON p.value_id = d.id WHERE d.field = %s AND d.value LIKE %s", phField, phVal)
-
 	case query.KeywordContains:
 		inner := p.Pattern[1 : len(p.Pattern)-1] // remove leading and trailing *
 		phVal := c.builder.Arg("%" + inner + "%")
 		sql = fmt.Sprintf("SELECT p.item_id FROM kw_dict d JOIN kw_postings p ON p.value_id = d.id WHERE d.field = %s AND d.value LIKE %s", phField, phVal)
-
 	case query.KeywordGlob:
-		phVal := c.builder.Arg(p.Pattern)
-		sql = fmt.Sprintf("SELECT p.item_id FROM kw_dict d JOIN kw_postings p ON p.value_id = d.id WHERE d.field = %s AND d.value GLOB %s", phField, phVal)
+		if c.backend == storage.BackendSQLite {
+			phVal := c.builder.Arg(p.Pattern)
+			sql = fmt.Sprintf("SELECT p.item_id FROM kw_dict d JOIN kw_postings p ON p.value_id = d.id WHERE d.field = %s AND d.value GLOB %s", phField, phVal)
+		} else {
+			like := globToLike(p.Pattern)
+			phVal := c.builder.Arg(like)
+			sql = fmt.Sprintf("SELECT p.item_id FROM kw_dict d JOIN kw_postings p ON p.value_id = d.id WHERE d.field = %s AND d.value LIKE %s ESCAPE '\\'", phField, phVal)
+		}
 	}
 
 	c.ctes = append(c.ctes, CTE{Name: resultName, SQL: sql})
@@ -350,43 +356,20 @@ func (c *Compiler) compileKeyword(p query.Keyword) (string, error) {
 	return resultName, nil
 }
 
-func (c *Compiler) compileText(p query.Text) (string, error) {
+func (c *Compiler) compileText(p query.Text, positive bool) (string, error) {
 	c.requiresFTSJoin = true
-	c.textPreds = append(c.textPreds, TextPredicate{Field: p.Field, Query: p.FTS})
 
-	resultName := c.nextCTEName()
-
-	// Build MATCH string
-	quotedFTS := quoteFTSTerm(p.FTS)
-	var matchStr string
-
-	if p.Field != nil {
-		// Validate text field exists
-		spec, ok := c.schema.Get(*p.Field)
-		if !ok {
-			return "", fmt.Errorf("unknown field: %s", *p.Field)
-		}
-		if spec.Type != storage.FieldType("text") {
-			return "", fmt.Errorf("FTS predicate used on non-text field %s", *p.Field)
-		}
-		matchStr = fmt.Sprintf("%s:%s", *p.Field, quotedFTS)
-	} else {
-		// Bare text - search all text fields
-		cols := c.schema.TextFieldsInOrder()
-		if len(cols) == 0 {
-			return "", fmt.Errorf("no text fields in schema for bare text query")
-		}
-		var parts []string
-		for _, tf := range cols {
-			parts = append(parts, fmt.Sprintf("%s:%s", tf.Name, quotedFTS))
-		}
-		matchStr = fmt.Sprintf("(%s)", joinOr(parts))
+	sp := storage.TextPredicate{Field: p.Field, Query: p.FTS}
+	if positive {
+		c.textPreds = append(c.textPreds, sp)
 	}
 
-	phMatch := c.builder.Arg(matchStr)
-	sql := fmt.Sprintf("SELECT rowid AS item_id FROM search WHERE search MATCH %s", phMatch)
-
-	c.ctes = append(c.ctes, CTE{Name: resultName, SQL: sql})
+	resultName := c.nextCTEName()
+	sqlBody, _, err := c.fts.CompileTextPredicate(c.builder, c.schema, sp)
+	if err != nil {
+		return "", err
+	}
+	c.ctes = append(c.ctes, CTE{Name: resultName, SQL: sqlBody})
 	c.explainSteps = append(c.explainSteps, fmt.Sprintf("FTS %s", p.FTS))
 	return resultName, nil
 }

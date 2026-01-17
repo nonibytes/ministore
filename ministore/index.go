@@ -205,7 +205,7 @@ func (ix *Index) DeleteWhere(ctx context.Context, queryStr string) (int, error) 
 	}
 
 	builder := sqlbuilder.New(ix.adapter.PlaceholderStyle())
-	compiled, err := planner.Compile(ix.schema.AsStorageSchema(), builder, normalizedExpr, ix.nowMS())
+	compiled, err := planner.Compile(ix.adapter, ix.schema.AsStorageSchema(), builder, normalizedExpr, ix.nowMS())
 	if err != nil {
 		return 0, Wrap(ErrQueryRejected, "compile query", err)
 	}
@@ -286,7 +286,7 @@ func (ix *Index) DiscoverValues(ctx context.Context, field string, where string,
 		}
 
 		builder := sqlbuilder.New(ix.adapter.PlaceholderStyle())
-		compiled, err := planner.Compile(ix.schema.AsStorageSchema(), builder, normalizedExpr, ix.nowMS())
+		compiled, err := planner.Compile(ix.adapter, ix.schema.AsStorageSchema(), builder, normalizedExpr, ix.nowMS())
 		if err != nil {
 			return nil, Wrap(ErrQueryRejected, "compile where", err)
 		}
@@ -305,7 +305,7 @@ func (ix *Index) DiscoverValues(ctx context.Context, field string, where string,
 		whereArgs = builder.Args()
 	}
 
-	results, err := ops.DiscoverValues(ctx, ix.db, ix.schema.AsStorageSchema(), field, whereSQL, whereArgs, top)
+	results, err := ops.DiscoverValues(ctx, ix.db, ix.adapter, ix.schema.AsStorageSchema(), field, whereSQL, whereArgs, top)
 	if err != nil {
 		return nil, Wrap(ErrSQL, "discover values", err)
 	}
@@ -320,7 +320,7 @@ func (ix *Index) DiscoverValues(ctx context.Context, field string, where string,
 
 // DiscoverFields returns an overview of all fields
 func (ix *Index) DiscoverFields(ctx context.Context) ([]FieldOverview, error) {
-	results, err := ops.DiscoverFields(ctx, ix.db, ix.schema.AsStorageSchema())
+	results, err := ops.DiscoverFields(ctx, ix.db, ix.adapter, ix.schema.AsStorageSchema())
 	if err != nil {
 		return nil, Wrap(ErrSQL, "discover fields", err)
 	}
@@ -359,7 +359,7 @@ func (ix *Index) Stats(ctx context.Context, field string, where string) (StatsRe
 		}
 
 		builder := sqlbuilder.New(ix.adapter.PlaceholderStyle())
-		compiled, err := planner.Compile(ix.schema.AsStorageSchema(), builder, normalizedExpr, ix.nowMS())
+		compiled, err := planner.Compile(ix.adapter, ix.schema.AsStorageSchema(), builder, normalizedExpr, ix.nowMS())
 		if err != nil {
 			return StatsResult{}, Wrap(ErrQueryRejected, "compile where", err)
 		}
@@ -378,7 +378,7 @@ func (ix *Index) Stats(ctx context.Context, field string, where string) (StatsRe
 		whereArgs = builder.Args()
 	}
 
-	result, err := ops.Stats(ctx, ix.db, ix.schema.AsStorageSchema(), field, whereSQL, whereArgs)
+	result, err := ops.Stats(ctx, ix.db, ix.adapter, ix.schema.AsStorageSchema(), field, whereSQL, whereArgs)
 	if err != nil {
 		return StatsResult{}, Wrap(ErrSQL, "stats", err)
 	}

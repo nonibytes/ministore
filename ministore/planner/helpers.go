@@ -16,6 +16,27 @@ func literalPrefixBeforeWildcard(pattern string) string {
 	return pattern
 }
 
+// globToLike converts a glob pattern (supports * and ?) into a SQL LIKE pattern.
+// It also escapes %, _, and \ so the result can be used with "ESCAPE '\'" safely.
+func globToLike(pattern string) string {
+	var b strings.Builder
+	b.Grow(len(pattern) + 8)
+	for _, r := range pattern {
+		switch r {
+		case '*':
+			b.WriteByte('%')
+		case '?':
+			b.WriteByte('_')
+		case '%', '_', '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // parseDateToEpochMS parses a date string to epoch milliseconds
 func parseDateToEpochMS(s string) (int64, error) {
 	// Try YYYY-MM-DD

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/ministore/ministore/ministore/storage"
+	"github.com/ministore/ministore/ministore/storage/sqlbuilder"
 )
 
 // ValueCount represents a keyword value with its document frequency
@@ -25,8 +26,15 @@ type FieldOverview struct {
 	Examples []string
 }
 
+func ph(style sqlbuilder.PlaceholderStyle, n int) string {
+	if style == sqlbuilder.PlaceholderDollar {
+		return fmt.Sprintf("$%d", n)
+	}
+	return "?"
+}
+
 // DiscoverValues returns top keyword values for a field
-func DiscoverValues(ctx context.Context, db *sql.DB, schema storage.Schema, field string, whereSQL string, whereArgs []any, top int) ([]ValueCount, error) {
+func DiscoverValues(ctx context.Context, db *sql.DB, adapter storage.Adapter, schema storage.Schema, field string, whereSQL string, whereArgs []any, top int) ([]ValueCount, error) {
 	// Validate field exists and is keyword
 	spec, ok := schema.Get(field)
 	if !ok {
@@ -40,32 +48,35 @@ func DiscoverValues(ctx context.Context, db *sql.DB, schema storage.Schema, fiel
 		top = 20
 	}
 
+	style := adapter.PlaceholderStyle()
+
 	var querySQL string
 	var args []any
 
 	if whereSQL == "" {
 		// Simple case: no filter, query from dict directly
-		querySQL = `
+		querySQL = fmt.Sprintf(`
 			SELECT d.value, d.doc_freq
 			FROM kw_dict d
-			WHERE d.field = ?
+			WHERE d.field = %s
 			ORDER BY d.doc_freq DESC, d.value ASC
-			LIMIT ?
-		`
+			LIMIT %s
+		`, ph(style, 1), ph(style, 2))
 		args = []any{field, top}
 	} else {
 		// Filtered case: join with postings and filter by result set
+		base := len(whereArgs)
 		querySQL = fmt.Sprintf(`
 			WITH filtered AS (%s)
 			SELECT d.value, COUNT(DISTINCT p.item_id) as cnt
 			FROM kw_dict d
 			JOIN kw_postings p ON p.value_id = d.id
 			JOIN filtered f ON f.item_id = p.item_id
-			WHERE d.field = ?
+			WHERE d.field = %s
 			GROUP BY d.value
 			ORDER BY cnt DESC, d.value ASC
-			LIMIT ?
-		`, whereSQL)
+			LIMIT %s
+		`, whereSQL, ph(style, base+1), ph(style, base+2))
 		args = append(whereArgs, field, top)
 	}
 
@@ -88,7 +99,10 @@ func DiscoverValues(ctx context.Context, db *sql.DB, schema storage.Schema, fiel
 }
 
 // DiscoverFields returns an overview of all schema fields
-func DiscoverFields(ctx context.Context, db *sql.DB, schema storage.Schema) ([]FieldOverview, error) {
+func DiscoverFields(ctx context.Context, db *sql.DB, adapter storage.Adapter, schema storage.Schema) ([]FieldOverview, error) {
+	style := adapter.PlaceholderStyle()
+	p1 := ph(style, 1)
+
 	var result []FieldOverview
 
 	// Get text fields
@@ -98,7 +112,7 @@ func DiscoverFields(ctx context.Context, db *sql.DB, schema storage.Schema) ([]F
 		// Count documents with this field
 		var docCount uint64
 		err := db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM field_present WHERE field = ?",
+			fmt.Sprintf("SELECT COUNT(*) FROM field_present WHERE field = %s", p1),
 			tf.Name,
 		).Scan(&docCount)
 		if err != nil {
@@ -161,7 +175,7 @@ func DiscoverFields(ctx context.Context, db *sql.DB, schema storage.Schema) ([]F
 
 		// Count documents
 		err := db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM field_present WHERE field = ?",
+			fmt.Sprintf("SELECT COUNT(*) FROM field_present WHERE field = %s", p1),
 			fieldName,
 		).Scan(&overview.DocCount)
 		if err != nil {
@@ -174,7 +188,7 @@ func DiscoverFields(ctx context.Context, db *sql.DB, schema storage.Schema) ([]F
 			// Count unique values
 			var unique uint64
 			err := db.QueryRowContext(ctx,
-				"SELECT COUNT(*) FROM kw_dict WHERE field = ?",
+				fmt.Sprintf("SELECT COUNT(*) FROM kw_dict WHERE field = %s", p1),
 				fieldName,
 			).Scan(&unique)
 			if err != nil {
@@ -184,7 +198,7 @@ func DiscoverFields(ctx context.Context, db *sql.DB, schema storage.Schema) ([]F
 
 			// Get top examples
 			exRows, err := db.QueryContext(ctx,
-				"SELECT value FROM kw_dict WHERE field = ? ORDER BY doc_freq DESC LIMIT 5",
+				fmt.Sprintf("SELECT value FROM kw_dict WHERE field = %s ORDER BY doc_freq DESC LIMIT 5", p1),
 				fieldName,
 			)
 			if err != nil {
@@ -204,7 +218,7 @@ func DiscoverFields(ctx context.Context, db *sql.DB, schema storage.Schema) ([]F
 			// Get min/max as examples
 			var minVal, maxVal sql.NullFloat64
 			db.QueryRowContext(ctx,
-				"SELECT MIN(value), MAX(value) FROM field_number WHERE field = ?",
+				fmt.Sprintf("SELECT MIN(value), MAX(value) FROM field_number WHERE field = %s", p1),
 				fieldName,
 			).Scan(&minVal, &maxVal)
 			if minVal.Valid {
@@ -218,7 +232,7 @@ func DiscoverFields(ctx context.Context, db *sql.DB, schema storage.Schema) ([]F
 			// Get min/max as examples
 			var minVal, maxVal sql.NullInt64
 			db.QueryRowContext(ctx,
-				"SELECT MIN(value), MAX(value) FROM field_date WHERE field = ?",
+				fmt.Sprintf("SELECT MIN(value), MAX(value) FROM field_date WHERE field = %s", p1),
 				fieldName,
 			).Scan(&minVal, &maxVal)
 			if minVal.Valid {
@@ -232,11 +246,11 @@ func DiscoverFields(ctx context.Context, db *sql.DB, schema storage.Schema) ([]F
 			// Count true/false
 			var trueCount, falseCount int64
 			db.QueryRowContext(ctx,
-				"SELECT COUNT(*) FROM field_bool WHERE field = ? AND value = 1",
+				fmt.Sprintf("SELECT COUNT(*) FROM field_bool WHERE field = %s AND value = 1", p1),
 				fieldName,
 			).Scan(&trueCount)
 			db.QueryRowContext(ctx,
-				"SELECT COUNT(*) FROM field_bool WHERE field = ? AND value = 0",
+				fmt.Sprintf("SELECT COUNT(*) FROM field_bool WHERE field = %s AND value = 0", p1),
 				fieldName,
 			).Scan(&falseCount)
 			overview.Examples = append(overview.Examples, fmt.Sprintf("true: %d, false: %d", trueCount, falseCount))

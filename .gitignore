@@ -66,3 +66,7 @@ __debug_bin
 *.pprof
 cpu.out
 mem.out
+
+# Code dump
+ALL.txt
+POSTGRES.md

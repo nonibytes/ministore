@@ -90,11 +90,14 @@ func Search(
 	// 3. Create builder for placeholder management
 	builder := sqlbuilder.New(adapter.PlaceholderStyle())
 
-	// 4. Compile to CTEs
-	compiled, err := planner.Compile(schema, builder, normalizedExpr, nowMS)
+	// 4. Compile to CTEs (adapter-aware)
+	compiled, err := planner.Compile(adapter, schema, builder, normalizedExpr, nowMS)
 	if err != nil {
 		return nil, fmt.Errorf("compile query: %w", err)
 	}
+
+	// Does RankDefault actually use FTS scoring?
+	hasFTSScore := opts.Rank.Kind == planner.RankDefault && len(compiled.TextPreds) > 0 && adapter.FTS().HasFTS(schema)
 
 	// 5. Resolve cursor if present
 	var afterFilter string
@@ -104,11 +107,9 @@ func Search(
 			return nil, fmt.Errorf("resolve cursor: %w", err)
 		}
 
-		// Build after filter based on rank mode and cursor payload
-		hasFTS := compiled.RequiresFTSJoin
 		afterFilter, err = planner.BuildAfterFilter(
 			opts.Rank,
-			hasFTS,
+			hasFTSScore,
 			builder,
 			cursor.Score,
 			cursor.ItemID,
@@ -127,7 +128,7 @@ func Search(
 	}
 	limitPlusOne := limit + 1
 
-	searchSQL, err := planner.BuildSearchSQL(schema, compiled, opts.Rank, limitPlusOne, afterFilter, builder)
+	searchSQL, err := planner.BuildSearchSQL(adapter, schema, compiled, opts.Rank, limitPlusOne, afterFilter, builder)
 	if err != nil {
 		return nil, fmt.Errorf("build search SQL: %w", err)
 	}
@@ -194,7 +195,7 @@ func Search(
 		// Determine cursor kind based on rank mode
 		switch opts.Rank.Kind {
 		case planner.RankDefault:
-			if compiled.RequiresFTSJoin {
+			if hasFTSScore {
 				cursor.Kind = CursorKindFTS
 			} else {
 				cursor.Kind = CursorKindRecency

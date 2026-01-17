@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/ministore/ministore/ministore"
+	"github.com/ministore/ministore/ministore/storage"
+	"github.com/ministore/ministore/ministore/storage/postgres"
 	"github.com/ministore/ministore/ministore/storage/sqlite"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -67,19 +69,37 @@ func main() {
 func printUsage() {
 	fmt.Println("ministore - A general-purpose search index")
 	fmt.Println("\nUsage:")
-	fmt.Println("  ministore index create -i <path> --schema <schema.json>")
-	fmt.Println("  ministore index schema -i <path>")
-	fmt.Println("  ministore index optimize -i <path>")
-	fmt.Println("  ministore put -i <path> --json         (read JSON lines from stdin)")
-	fmt.Println("  ministore put -i <path> -p <item-path> --set key=value...")
-	fmt.Println("  ministore get -i <path> -p <item-path>")
-	fmt.Println("  ministore peek -i <path> -p <item-path>")
-	fmt.Println("  ministore delete -i <path> -p <item-path>")
-	fmt.Println("  ministore delete -i <path> -w <query>")
-	fmt.Println("  ministore search -i <path> -w <query> [--limit N] [--show all|field1,field2]")
-	fmt.Println("  ministore discover fields -i <path>")
-	fmt.Println("  ministore discover values -i <path> --field <field> [--top N] [-w <query>]")
-	fmt.Println("  ministore stats -i <path> --field <field> [-w <query>]")
+	fmt.Println("  ministore index create -i <path> --schema <schema.json> [--backend sqlite|postgres] [--schema-name <name>]")
+	fmt.Println("  ministore index schema -i <path> [--backend sqlite|postgres] [--schema-name <name>]")
+	fmt.Println("  ministore index optimize -i <path> [--backend sqlite|postgres] [--schema-name <name>]")
+	fmt.Println("  ministore put -i <path> --json [--backend sqlite|postgres] [--schema-name <name>]     (read JSON lines from stdin)")
+	fmt.Println("  ministore put -i <path> -p <item-path> --set key=value... [--backend sqlite|postgres] [--schema-name <name>]")
+	fmt.Println("  ministore get -i <path> -p <item-path> [--backend sqlite|postgres] [--schema-name <name>]")
+	fmt.Println("  ministore peek -i <path> -p <item-path> [--backend sqlite|postgres] [--schema-name <name>]")
+	fmt.Println("  ministore delete -i <path> -p <item-path> [--backend sqlite|postgres] [--schema-name <name>]")
+	fmt.Println("  ministore delete -i <path> -w <query> [--backend sqlite|postgres] [--schema-name <name>]")
+	fmt.Println("  ministore search -i <path> -w <query> [--limit N] [--show all|field1,field2] [--backend sqlite|postgres] [--schema-name <name>]")
+	fmt.Println("  ministore discover fields -i <path> [--backend sqlite|postgres] [--schema-name <name>]")
+	fmt.Println("  ministore discover values -i <path> --field <field> [--top N] [-w <query>] [--backend sqlite|postgres] [--schema-name <name>]")
+	fmt.Println("  ministore stats -i <path> --field <field> [-w <query>] [--backend sqlite|postgres] [--schema-name <name>]")
+	fmt.Println("\nBackends:")
+	fmt.Println("  sqlite   - SQLite file database (default)")
+	fmt.Println("  postgres - PostgreSQL database (requires connection string)")
+	fmt.Println("\nFor PostgreSQL, -i is the connection string: postgresql://user:pass@host:port/dbname")
+	fmt.Println("Use --schema-name to specify the PostgreSQL schema (defaults to 'ministore')")
+}
+
+// createAdapter creates the appropriate storage adapter based on backend flag
+func createAdapter(backend, indexPath, schemaName string) storage.Adapter {
+	switch backend {
+	case "postgres", "pg":
+		if schemaName == "" {
+			schemaName = "ministore"
+		}
+		return postgres.New(indexPath, schemaName)
+	default:
+		return sqlite.New(indexPath)
+	}
 }
 
 func handleIndex(ctx context.Context, args []string) {
@@ -95,6 +115,8 @@ func handleIndex(ctx context.Context, args []string) {
 		fs := flag.NewFlagSet("index create", flag.ExitOnError)
 		indexPath := fs.String("i", "", "index path (required)")
 		schemaFile := fs.String("schema", "", "schema JSON file (required)")
+		backend := fs.String("backend", "sqlite", "backend: sqlite or postgres")
+		schemaName := fs.String("schema-name", "", "PostgreSQL schema name (default: ministore)")
 		fs.Parse(args[1:])
 
 		if *indexPath == "" || *schemaFile == "" {
@@ -115,7 +137,7 @@ func handleIndex(ctx context.Context, args []string) {
 			os.Exit(1)
 		}
 
-		adapter := sqlite.New(*indexPath)
+		adapter := createAdapter(*backend, *indexPath, *schemaName)
 		ix, err := ministore.Create(ctx, adapter, schema, ministore.DefaultIndexOptions())
 		if err != nil {
 			fmt.Printf("Error creating index: %v\n", err)
@@ -124,11 +146,16 @@ func handleIndex(ctx context.Context, args []string) {
 		defer ix.Close()
 
 		fmt.Printf("Created index at: %s\n", *indexPath)
+		if *backend == "postgres" || *backend == "pg" {
+			fmt.Printf("Schema: %s\n", *schemaName)
+		}
 		fmt.Printf("Fields: %d\n", len(schema.Fields))
 
 	case "schema":
 		fs := flag.NewFlagSet("index schema", flag.ExitOnError)
 		indexPath := fs.String("i", "", "index path (required)")
+		backend := fs.String("backend", "sqlite", "backend: sqlite or postgres")
+		schemaName := fs.String("schema-name", "", "PostgreSQL schema name (default: ministore)")
 		fs.Parse(args[1:])
 
 		if *indexPath == "" {
@@ -136,7 +163,7 @@ func handleIndex(ctx context.Context, args []string) {
 			os.Exit(1)
 		}
 
-		adapter := sqlite.New(*indexPath)
+		adapter := createAdapter(*backend, *indexPath, *schemaName)
 		ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 		if err != nil {
 			fmt.Printf("Error opening index: %v\n", err)
@@ -156,6 +183,8 @@ func handleIndex(ctx context.Context, args []string) {
 	case "optimize":
 		fs := flag.NewFlagSet("index optimize", flag.ExitOnError)
 		indexPath := fs.String("i", "", "index path (required)")
+		backend := fs.String("backend", "sqlite", "backend: sqlite or postgres")
+		schemaName := fs.String("schema-name", "", "PostgreSQL schema name (default: ministore)")
 		fs.Parse(args[1:])
 
 		if *indexPath == "" {
@@ -163,7 +192,7 @@ func handleIndex(ctx context.Context, args []string) {
 			os.Exit(1)
 		}
 
-		adapter := sqlite.New(*indexPath)
+		adapter := createAdapter(*backend, *indexPath, *schemaName)
 		ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 		if err != nil {
 			fmt.Printf("Error opening index: %v\n", err)
@@ -189,6 +218,8 @@ func handlePut(ctx context.Context, args []string) {
 	indexPath := fs.String("i", "", "index path (required)")
 	itemPath := fs.String("p", "", "item path (for single put with --set)")
 	jsonMode := fs.Bool("json", false, "read JSON lines from stdin")
+	backend := fs.String("backend", "sqlite", "backend: sqlite or postgres")
+	schemaName := fs.String("schema-name", "", "PostgreSQL schema name (default: ministore)")
 
 	var sets setArgs
 	fs.Var(&sets, "set", "set field value key=value (repeatable)")
@@ -200,7 +231,7 @@ func handlePut(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
-	adapter := sqlite.New(*indexPath)
+	adapter := createAdapter(*backend, *indexPath, *schemaName)
 	ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 	if err != nil {
 		fmt.Printf("Error opening index: %v\n", err)
@@ -261,6 +292,8 @@ func handleGet(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("get", flag.ExitOnError)
 	indexPath := fs.String("i", "", "index path (required)")
 	itemPath := fs.String("p", "", "item path (required)")
+	backend := fs.String("backend", "sqlite", "backend: sqlite or postgres")
+	schemaName := fs.String("schema-name", "", "PostgreSQL schema name (default: ministore)")
 	fs.Parse(args)
 
 	if *indexPath == "" || *itemPath == "" {
@@ -268,7 +301,7 @@ func handleGet(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
-	adapter := sqlite.New(*indexPath)
+	adapter := createAdapter(*backend, *indexPath, *schemaName)
 	ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 	if err != nil {
 		fmt.Printf("Error opening index: %v\n", err)
@@ -296,6 +329,8 @@ func handlePeek(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("peek", flag.ExitOnError)
 	indexPath := fs.String("i", "", "index path (required)")
 	itemPath := fs.String("p", "", "item path (required)")
+	backend := fs.String("backend", "sqlite", "backend: sqlite or postgres")
+	schemaName := fs.String("schema-name", "", "PostgreSQL schema name (default: ministore)")
 	fs.Parse(args)
 
 	if *indexPath == "" || *itemPath == "" {
@@ -303,7 +338,7 @@ func handlePeek(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
-	adapter := sqlite.New(*indexPath)
+	adapter := createAdapter(*backend, *indexPath, *schemaName)
 	ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 	if err != nil {
 		fmt.Printf("Error opening index: %v\n", err)
@@ -336,6 +371,8 @@ func handleDelete(ctx context.Context, args []string) {
 	indexPath := fs.String("i", "", "index path (required)")
 	itemPath := fs.String("p", "", "item path (for single delete)")
 	where := fs.String("w", "", "query for batch delete")
+	backend := fs.String("backend", "sqlite", "backend: sqlite or postgres")
+	schemaName := fs.String("schema-name", "", "PostgreSQL schema name (default: ministore)")
 	fs.Parse(args)
 
 	if *indexPath == "" {
@@ -348,7 +385,7 @@ func handleDelete(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
-	adapter := sqlite.New(*indexPath)
+	adapter := createAdapter(*backend, *indexPath, *schemaName)
 	ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 	if err != nil {
 		fmt.Printf("Error opening index: %v\n", err)
@@ -386,6 +423,9 @@ func handleSearch(ctx context.Context, args []string) {
 	rank := fs.String("rank", "default", "ranking: default, recency, none, or field:<name>")
 	explain := fs.Bool("explain", false, "show query plan")
 	after := fs.String("after", "", "cursor for pagination")
+	format := fs.String("format", "pretty", "output format: pretty or json")
+	backend := fs.String("backend", "sqlite", "backend: sqlite or postgres")
+	schemaName := fs.String("schema-name", "", "PostgreSQL schema name (default: ministore)")
 	fs.Parse(args)
 
 	if *indexPath == "" || *where == "" {
@@ -393,7 +433,7 @@ func handleSearch(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
-	adapter := sqlite.New(*indexPath)
+	adapter := createAdapter(*backend, *indexPath, *schemaName)
 	ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 	if err != nil {
 		fmt.Printf("Error opening index: %v\n", err)
@@ -440,7 +480,29 @@ func handleSearch(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
-	// Print explain info if requested
+	// JSON output mode
+	if *format == "json" {
+		output := map[string]any{
+			"items":    make([]any, 0, len(result.Items)),
+			"has_more": result.HasMore,
+		}
+		if result.NextCursor != "" {
+			output["next_cursor"] = result.NextCursor
+		}
+
+		for _, item := range result.Items {
+			var obj any
+			if err := json.Unmarshal(item, &obj); err == nil {
+				output["items"] = append(output["items"].([]any), obj)
+			}
+		}
+
+		jsonOut, _ := json.Marshal(output)
+		fmt.Println(string(jsonOut))
+		return
+	}
+
+	// Pretty output mode
 	if *explain {
 		fmt.Println("=== Query Plan ===")
 		for _, step := range result.ExplainSteps {
@@ -485,6 +547,9 @@ func handleDiscover(ctx context.Context, args []string) {
 	case "fields":
 		fs := flag.NewFlagSet("discover fields", flag.ExitOnError)
 		indexPath := fs.String("i", "", "index path (required)")
+		backend := fs.String("backend", "sqlite", "backend: sqlite or postgres")
+		schemaName := fs.String("schema-name", "", "PostgreSQL schema name (default: ministore)")
+		format := fs.String("format", "pretty", "output format: pretty or json")
 		fs.Parse(args[1:])
 
 		if *indexPath == "" {
@@ -492,7 +557,7 @@ func handleDiscover(ctx context.Context, args []string) {
 			os.Exit(1)
 		}
 
-		adapter := sqlite.New(*indexPath)
+		adapter := createAdapter(*backend, *indexPath, *schemaName)
 		ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 		if err != nil {
 			fmt.Printf("Error opening index: %v\n", err)
@@ -504,6 +569,12 @@ func handleDiscover(ctx context.Context, args []string) {
 		if err != nil {
 			fmt.Printf("Error discovering fields: %v\n", err)
 			os.Exit(1)
+		}
+
+		if *format == "json" {
+			jsonOut, _ := json.Marshal(fields)
+			fmt.Println(string(jsonOut))
+			return
 		}
 
 		for _, f := range fields {
@@ -526,6 +597,9 @@ func handleDiscover(ctx context.Context, args []string) {
 		field := fs.String("field", "", "field name (required)")
 		top := fs.Int("top", 20, "number of values to return")
 		where := fs.String("w", "", "filter query")
+		backend := fs.String("backend", "sqlite", "backend: sqlite or postgres")
+		schemaName := fs.String("schema-name", "", "PostgreSQL schema name (default: ministore)")
+		format := fs.String("format", "pretty", "output format: pretty or json")
 		fs.Parse(args[1:])
 
 		if *indexPath == "" || *field == "" {
@@ -533,7 +607,7 @@ func handleDiscover(ctx context.Context, args []string) {
 			os.Exit(1)
 		}
 
-		adapter := sqlite.New(*indexPath)
+		adapter := createAdapter(*backend, *indexPath, *schemaName)
 		ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 		if err != nil {
 			fmt.Printf("Error opening index: %v\n", err)
@@ -545,6 +619,12 @@ func handleDiscover(ctx context.Context, args []string) {
 		if err != nil {
 			fmt.Printf("Error discovering values: %v\n", err)
 			os.Exit(1)
+		}
+
+		if *format == "json" {
+			jsonOut, _ := json.Marshal(values)
+			fmt.Println(string(jsonOut))
+			return
 		}
 
 		fmt.Printf("Top values for field '%s':\n", *field)
@@ -563,6 +643,9 @@ func handleStats(ctx context.Context, args []string) {
 	indexPath := fs.String("i", "", "index path (required)")
 	field := fs.String("field", "", "field name (required)")
 	where := fs.String("w", "", "filter query")
+	backend := fs.String("backend", "sqlite", "backend: sqlite or postgres")
+	schemaName := fs.String("schema-name", "", "PostgreSQL schema name (default: ministore)")
+	format := fs.String("format", "pretty", "output format: pretty or json")
 	fs.Parse(args)
 
 	if *indexPath == "" || *field == "" {
@@ -570,7 +653,7 @@ func handleStats(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
-	adapter := sqlite.New(*indexPath)
+	adapter := createAdapter(*backend, *indexPath, *schemaName)
 	ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 	if err != nil {
 		fmt.Printf("Error opening index: %v\n", err)
@@ -582,6 +665,28 @@ func handleStats(ctx context.Context, args []string) {
 	if err != nil {
 		fmt.Printf("Error getting stats: %v\n", err)
 		os.Exit(1)
+	}
+
+	if *format == "json" {
+		output := map[string]any{
+			"field": stats.Field,
+			"count": stats.Count,
+		}
+		if stats.Min != nil {
+			output["min"] = *stats.Min
+		}
+		if stats.Max != nil {
+			output["max"] = *stats.Max
+		}
+		if stats.Avg != nil {
+			output["avg"] = *stats.Avg
+		}
+		if stats.Median != nil {
+			output["median"] = *stats.Median
+		}
+		jsonOut, _ := json.Marshal(output)
+		fmt.Println(string(jsonOut))
+		return
 	}
 
 	fmt.Printf("Statistics for field '%s':\n", stats.Field)

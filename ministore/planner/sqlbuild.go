@@ -25,6 +25,7 @@ const (
 
 // BuildSearchSQL builds the final search SQL
 func BuildSearchSQL(
+	adapter storage.Adapter,
 	schema storage.Schema,
 	compiled *CompileOutput,
 	rank RankMode,
@@ -34,12 +35,12 @@ func BuildSearchSQL(
 ) (string, error) {
 	var cteParts []string
 
-	// Build CTEs
+	// Base CTEs
 	for _, cte := range compiled.CTEs {
 		cteParts = append(cteParts, fmt.Sprintf("%s AS (%s)", cte.Name, cte.SQL))
 	}
 
-	// Field ranking CTE if needed
+	// RankField: build rank aggregation CTE
 	var fieldRankCTEName string
 	if rank.Kind == RankField {
 		spec, ok := schema.Get(rank.Field)
@@ -68,46 +69,58 @@ func BuildSearchSQL(
 		cteParts = append(cteParts, fmt.Sprintf("%s AS (%s)", fieldRankCTEName, cteSQL))
 	}
 
+	// RankDefault+FTS: add FTS score CTEs (positive-context text predicates only)
+	var ftsJoinSQL string
+	var scoreExpr string
+	var orderClause string
+
+	hasFTSScore := rank.Kind == RankDefault && len(compiled.TextPreds) > 0 && adapter.FTS().HasFTS(schema)
+	if hasFTSScore {
+		extraCTEs, joinSQL, score, err := adapter.FTS().ScoreCTEsAndJoin(builder, schema, compiled.TextPreds)
+		if err != nil {
+			return "", err
+		}
+		for _, c := range extraCTEs {
+			cteParts = append(cteParts, fmt.Sprintf("%s AS (%s)", c.Name, c.SQL))
+		}
+		ftsJoinSQL = joinSQL
+		scoreExpr = score
+		orderClause = "ORDER BY score DESC, item_id ASC"
+	}
+
+	if !hasFTSScore {
+		switch rank.Kind {
+		case RankRecency:
+			orderClause = "ORDER BY updated_at DESC, path ASC"
+			scoreExpr = "CAST(i.updated_at AS DOUBLE PRECISION)"
+		case RankField:
+			orderClause = "ORDER BY score DESC, updated_at DESC, path ASC"
+			scoreExpr = fmt.Sprintf("CAST(%s.rank_value AS DOUBLE PRECISION)", fieldRankCTEName)
+		case RankNone:
+			orderClause = "ORDER BY item_id ASC"
+			scoreExpr = "NULL"
+		case RankDefault:
+			// Default without FTS score - fallback to recency
+			orderClause = "ORDER BY updated_at DESC, path ASC"
+			scoreExpr = "CAST(i.updated_at AS DOUBLE PRECISION)"
+		}
+	}
+
 	var withClause string
 	if len(cteParts) > 0 {
 		withClause = fmt.Sprintf("WITH %s ", strings.Join(cteParts, ", "))
 	}
 
-	// Build main SELECT with proper ranking
 	selectColsInner := "i.id AS item_id, i.path AS path, i.data_json AS data_json, i.created_at AS created_at, i.updated_at AS updated_at"
 
-	var orderClause, scoreExpr, ftsJoin, extraJoin string
-
-	if rank.Kind == RankDefault && compiled.RequiresFTSJoin {
-		// Weighted BM25: score = -bm25(search, w1, w2, ...)
-		textFields := schema.TextFieldsInOrder()
-		var weights []string
-		for _, tf := range textFields {
-			weights = append(weights, fmt.Sprintf("%g", tf.Weight))
-		}
-		weightsStr := strings.Join(weights, ", ")
-
-		scoreExpr = fmt.Sprintf("(-bm25(search, %s))", weightsStr)
-		orderClause = "ORDER BY score DESC, item_id ASC"
-		ftsJoin = "JOIN search ON search.rowid = i.id"
-	} else {
-		switch rank.Kind {
-		case RankRecency:
-			orderClause = "ORDER BY updated_at DESC, path ASC"
-			scoreExpr = "CAST(i.updated_at AS REAL)"
-		case RankField:
-			orderClause = "ORDER BY score DESC, updated_at DESC, path ASC"
-			scoreExpr = fmt.Sprintf("CAST(%s.rank_value AS REAL)", fieldRankCTEName)
-			extraJoin = fmt.Sprintf("JOIN %s ON %s.item_id = i.id", fieldRankCTEName, fieldRankCTEName)
-		case RankNone:
-			orderClause = "ORDER BY item_id ASC"
-			scoreExpr = "NULL"
-		case RankDefault:
-			// Default without FTS - fallback to recency
-			orderClause = "ORDER BY updated_at DESC, path ASC"
-			scoreExpr = "CAST(i.updated_at AS REAL)"
-		}
+	var joins []string
+	if ftsJoinSQL != "" {
+		joins = append(joins, ftsJoinSQL)
 	}
+	if rank.Kind == RankField {
+		joins = append(joins, fmt.Sprintf("JOIN %s ON %s.item_id = i.id", fieldRankCTEName, fieldRankCTEName))
+	}
+	joinsSQL := strings.Join(joins, "\n  ")
 
 	var afterWhere string
 	if afterFilter != "" {
@@ -120,7 +133,6 @@ FROM (
   SELECT %s, %s AS score
   FROM items i
   %s
-  %s
   JOIN %s r ON r.item_id = i.id
 ) q
 WHERE 1=1 %s
@@ -129,8 +141,7 @@ LIMIT %d`,
 		withClause,
 		selectColsInner,
 		scoreExpr,
-		ftsJoin,
-		extraJoin,
+		joinsSQL,
 		compiled.ResultCTE,
 		afterWhere,
 		orderClause,
@@ -141,21 +152,20 @@ LIMIT %d`,
 }
 
 // BuildAfterFilter builds the after-filter fragment for cursor pagination
-func BuildAfterFilter(rank RankMode, hasFTS bool, builder storage.Builder, score float64, itemID int64, updatedAtMS int64, path string) (string, error) {
+func BuildAfterFilter(rank RankMode, hasFTSScore bool, builder storage.Builder, score float64, itemID int64, updatedAtMS int64, path string) (string, error) {
 	switch rank.Kind {
 	case RankNone:
 		ph := builder.Arg(itemID)
 		return fmt.Sprintf("item_id > %s", ph), nil
 
 	case RankDefault:
-		if hasFTS {
-			// Default w/ FTS: ORDER BY score DESC, item_id ASC
+		if hasFTSScore {
+			// Default w/ FTS score: ORDER BY score DESC, item_id ASC
 			phScore1 := builder.Arg(score)
 			phScore2 := builder.Arg(score)
 			phItemID := builder.Arg(itemID)
 			return fmt.Sprintf("(score < %s OR (score = %s AND item_id > %s))", phScore1, phScore2, phItemID), nil
 		}
-		// Fallback recency
 		fallthrough
 
 	case RankRecency:

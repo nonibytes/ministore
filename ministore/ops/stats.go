@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/ministore/ministore/ministore/storage"
+	"github.com/ministore/ministore/ministore/storage/sqlbuilder"
 )
 
 // StatsResult contains statistics for a field
@@ -19,14 +20,16 @@ type StatsResult struct {
 }
 
 // Stats computes statistics for a numeric or date field
-func Stats(ctx context.Context, db *sql.DB, schema storage.Schema, field string, whereSQL string, whereArgs []any) (*StatsResult, error) {
+func Stats(ctx context.Context, db *sql.DB, adapter storage.Adapter, schema storage.Schema, field string, whereSQL string, whereArgs []any) (*StatsResult, error) {
+	style := adapter.PlaceholderStyle()
+
 	// Handle implicit created/updated fields
 	if field == "created" || field == "updated" {
 		col := "created_at"
 		if field == "updated" {
 			col = "updated_at"
 		}
-		return statsFromItemsColumn(ctx, db, field, col, whereSQL, whereArgs)
+		return statsFromItemsColumn(ctx, db, style, field, col, whereSQL, whereArgs)
 	}
 
 	// Validate field exists
@@ -46,12 +49,12 @@ func Stats(ctx context.Context, db *sql.DB, schema storage.Schema, field string,
 	}
 
 	if whereSQL == "" {
-		return statsFromTable(ctx, db, field, table)
+		return statsFromTable(ctx, db, style, field, table)
 	}
-	return statsFromTableFiltered(ctx, db, field, table, whereSQL, whereArgs)
+	return statsFromTableFiltered(ctx, db, style, field, table, whereSQL, whereArgs)
 }
 
-func statsFromItemsColumn(ctx context.Context, db *sql.DB, field, col, whereSQL string, whereArgs []any) (*StatsResult, error) {
+func statsFromItemsColumn(ctx context.Context, db *sql.DB, style sqlbuilder.PlaceholderStyle, field, col, whereSQL string, whereArgs []any) (*StatsResult, error) {
 	result := &StatsResult{Field: field}
 
 	var querySQL string
@@ -90,9 +93,9 @@ func statsFromItemsColumn(ctx context.Context, db *sql.DB, field, col, whereSQL 
 		result.Avg = &avgVal.Float64
 	}
 
-	// Calculate median for SQLite
+	// Calculate median
 	if count > 0 {
-		median, err := medianFromItemsColumn(ctx, db, col, whereSQL, whereArgs, count)
+		median, err := medianFromItemsColumn(ctx, db, style, col, whereSQL, whereArgs, count)
 		if err == nil {
 			result.Median = median
 		}
@@ -101,14 +104,14 @@ func statsFromItemsColumn(ctx context.Context, db *sql.DB, field, col, whereSQL 
 	return result, nil
 }
 
-func statsFromTable(ctx context.Context, db *sql.DB, field, table string) (*StatsResult, error) {
+func statsFromTable(ctx context.Context, db *sql.DB, style sqlbuilder.PlaceholderStyle, field, table string) (*StatsResult, error) {
 	result := &StatsResult{Field: field}
 
 	querySQL := fmt.Sprintf(`
 		SELECT COUNT(*), MIN(value), MAX(value), AVG(value)
 		FROM %s
-		WHERE field = ?
-	`, table)
+		WHERE field = %s
+	`, table, ph(style, 1))
 
 	var count uint64
 	var minVal, maxVal, avgVal sql.NullFloat64
@@ -130,7 +133,7 @@ func statsFromTable(ctx context.Context, db *sql.DB, field, table string) (*Stat
 
 	// Calculate median
 	if count > 0 {
-		median, err := medianFromTable(ctx, db, table, field, count)
+		median, err := medianFromTable(ctx, db, style, table, field, count)
 		if err == nil {
 			result.Median = median
 		}
@@ -139,16 +142,17 @@ func statsFromTable(ctx context.Context, db *sql.DB, field, table string) (*Stat
 	return result, nil
 }
 
-func statsFromTableFiltered(ctx context.Context, db *sql.DB, field, table, whereSQL string, whereArgs []any) (*StatsResult, error) {
+func statsFromTableFiltered(ctx context.Context, db *sql.DB, style sqlbuilder.PlaceholderStyle, field, table, whereSQL string, whereArgs []any) (*StatsResult, error) {
 	result := &StatsResult{Field: field}
 
+	base := len(whereArgs)
 	querySQL := fmt.Sprintf(`
 		WITH filtered AS (%s)
 		SELECT COUNT(*), MIN(t.value), MAX(t.value), AVG(t.value)
 		FROM %s t
 		JOIN filtered f ON f.item_id = t.item_id
-		WHERE t.field = ?
-	`, whereSQL, table)
+		WHERE t.field = %s
+	`, whereSQL, table, ph(style, base+1))
 
 	args := append(whereArgs, field)
 
@@ -172,7 +176,7 @@ func statsFromTableFiltered(ctx context.Context, db *sql.DB, field, table, where
 
 	// Calculate median
 	if count > 0 {
-		median, err := medianFromTableFiltered(ctx, db, table, field, whereSQL, whereArgs, count)
+		median, err := medianFromTableFiltered(ctx, db, style, table, field, whereSQL, whereArgs, count)
 		if err == nil {
 			result.Median = median
 		}
@@ -181,15 +185,15 @@ func statsFromTableFiltered(ctx context.Context, db *sql.DB, field, table, where
 	return result, nil
 }
 
-func medianFromTable(ctx context.Context, db *sql.DB, table, field string, count uint64) (*float64, error) {
+func medianFromTable(ctx context.Context, db *sql.DB, style sqlbuilder.PlaceholderStyle, table, field string, count uint64) (*float64, error) {
 	offset := (count - 1) / 2
 
 	querySQL := fmt.Sprintf(`
 		SELECT value FROM %s
-		WHERE field = ?
+		WHERE field = %s
 		ORDER BY value
-		LIMIT 1 OFFSET ?
-	`, table)
+		LIMIT 1 OFFSET %s
+	`, table, ph(style, 1), ph(style, 2))
 
 	var val1 float64
 	err := db.QueryRowContext(ctx, querySQL, field, offset).Scan(&val1)
@@ -211,17 +215,18 @@ func medianFromTable(ctx context.Context, db *sql.DB, table, field string, count
 	return &val1, nil
 }
 
-func medianFromTableFiltered(ctx context.Context, db *sql.DB, table, field, whereSQL string, whereArgs []any, count uint64) (*float64, error) {
+func medianFromTableFiltered(ctx context.Context, db *sql.DB, style sqlbuilder.PlaceholderStyle, table, field, whereSQL string, whereArgs []any, count uint64) (*float64, error) {
 	offset := (count - 1) / 2
 
+	base := len(whereArgs)
 	querySQL := fmt.Sprintf(`
 		WITH filtered AS (%s)
 		SELECT t.value FROM %s t
 		JOIN filtered f ON f.item_id = t.item_id
-		WHERE t.field = ?
+		WHERE t.field = %s
 		ORDER BY t.value
-		LIMIT 1 OFFSET ?
-	`, whereSQL, table)
+		LIMIT 1 OFFSET %s
+	`, whereSQL, table, ph(style, base+1), ph(style, base+2))
 
 	args := append(whereArgs, field, offset)
 
@@ -246,7 +251,7 @@ func medianFromTableFiltered(ctx context.Context, db *sql.DB, table, field, wher
 	return &val1, nil
 }
 
-func medianFromItemsColumn(ctx context.Context, db *sql.DB, col, whereSQL string, whereArgs []any, count uint64) (*float64, error) {
+func medianFromItemsColumn(ctx context.Context, db *sql.DB, style sqlbuilder.PlaceholderStyle, col, whereSQL string, whereArgs []any, count uint64) (*float64, error) {
 	offset := (count - 1) / 2
 
 	var querySQL string
@@ -256,17 +261,18 @@ func medianFromItemsColumn(ctx context.Context, db *sql.DB, col, whereSQL string
 		querySQL = fmt.Sprintf(`
 			SELECT %s FROM items
 			ORDER BY %s
-			LIMIT 1 OFFSET ?
-		`, col, col)
+			LIMIT 1 OFFSET %s
+		`, col, col, ph(style, 1))
 		args = []any{offset}
 	} else {
+		base := len(whereArgs)
 		querySQL = fmt.Sprintf(`
 			WITH filtered AS (%s)
 			SELECT i.%s FROM items i
 			JOIN filtered f ON f.item_id = i.id
 			ORDER BY i.%s
-			LIMIT 1 OFFSET ?
-		`, whereSQL, col, col)
+			LIMIT 1 OFFSET %s
+		`, whereSQL, col, col, ph(style, base+1))
 		args = append(whereArgs, offset)
 	}
 
