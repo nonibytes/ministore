@@ -14,6 +14,15 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+// setArgs is a custom flag type for repeatable --set flags
+type setArgs []string
+
+func (s *setArgs) String() string { return strings.Join(*s, ",") }
+func (s *setArgs) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -180,6 +189,10 @@ func handlePut(ctx context.Context, args []string) {
 	indexPath := fs.String("i", "", "index path (required)")
 	itemPath := fs.String("p", "", "item path (for single put with --set)")
 	jsonMode := fs.Bool("json", false, "read JSON lines from stdin")
+
+	var sets setArgs
+	fs.Var(&sets, "set", "set field value key=value (repeatable)")
+
 	fs.Parse(args)
 
 	if *indexPath == "" {
@@ -217,16 +230,14 @@ func handlePut(ctx context.Context, args []string) {
 		fmt.Printf("Put %d items\n", count)
 	} else if *itemPath != "" {
 		// Single put with --set flags
-		remaining := fs.Args()
 		doc := map[string]any{"path": *itemPath}
-		for _, arg := range remaining {
-			if strings.HasPrefix(arg, "--set=") {
-				kv := strings.TrimPrefix(arg, "--set=")
-				parts := strings.SplitN(kv, "=", 2)
-				if len(parts) == 2 {
-					doc[parts[0]] = parts[1]
-				}
+		for _, kv := range sets {
+			parts := strings.SplitN(kv, "=", 2)
+			if len(parts) != 2 {
+				fmt.Printf("Invalid --set %q (expected key=value)\n", kv)
+				os.Exit(1)
 			}
+			doc[parts[0]] = parts[1]
 		}
 
 		docJSON, err := json.Marshal(doc)

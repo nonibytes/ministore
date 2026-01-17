@@ -93,16 +93,26 @@ func TestNormalizePureNegation(t *testing.T) {
 	// which may or may not be considered a valid anchor depending on implementation
 }
 
-func TestNormalizeNotFieldedQuery(t *testing.T) {
-	// NOT followed by a fielded query is just a NOT expression
+func TestNormalizeRejectsPureNegationExpression(t *testing.T) {
+	// This is a *true* negation expression (fielded), so it should have no positive anchor.
 	expr, err := Parse("NOT tags:hidden")
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
 	_, err = Normalize(expr, DefaultNormalizeOptions())
-	// This should be rejected as it has no positive anchor
 	if err == nil {
-		t.Logf("normalize allowed NOT tags:hidden (no positive anchor) - may be by design")
+		t.Fatalf("expected normalize to reject pure negation expression")
+	}
+}
+
+func TestNormalizeRejectsEmptyText(t *testing.T) {
+	expr, err := Parse(`""`)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	_, err = Normalize(expr, DefaultNormalizeOptions())
+	if err == nil {
+		t.Fatalf("expected normalize to reject empty text term")
 	}
 }
 

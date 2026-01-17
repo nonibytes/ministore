@@ -227,36 +227,14 @@ func ExecutePut(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, fts storage.F
 	return itemID, createdAtMS, nil
 }
 
-func upsertItem(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, path string, dataJSON []byte, nowMS int64) (itemID int64, createdAtMS int64, error error) {
-	// Check if item exists
-	var existingID int64
-	var existingCreatedAt int64
-	err := tx.QueryRowContext(ctx, sqlt.FindItemIDByPath, path).Scan(&existingID, &existingCreatedAt)
+func upsertItem(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, path string, dataJSON []byte, nowMS int64) (itemID int64, createdAtMS int64, err error) {
+	sql, args := sqlt.UpsertItem.Build(path, dataJSON, nowMS, nowMS, false)
 
-	if err == sql.ErrNoRows {
-		// Insert new item
-		sql, args := sqlt.UpsertItem.Build(path, dataJSON, nowMS, nowMS, false)
-		result, err := tx.ExecContext(ctx, sql, args...)
-		if err != nil {
-			return 0, 0, err
-		}
-		itemID, err = result.LastInsertId()
-		if err != nil {
-			return 0, 0, err
-		}
-		return itemID, nowMS, nil
-	}
-	if err != nil {
+	// SQLite template uses RETURNING id, created_at, so we must Scan.
+	if err := tx.QueryRowContext(ctx, sql, args...).Scan(&itemID, &createdAtMS); err != nil {
 		return 0, 0, err
 	}
-
-	// Update existing item
-	sql, args := sqlt.UpsertItemWithTS.Build(path, dataJSON, existingCreatedAt, nowMS, false)
-	_, err = tx.ExecContext(ctx, sql, args...)
-	if err != nil {
-		return 0, 0, err
-	}
-	return existingID, existingCreatedAt, nil
+	return itemID, createdAtMS, nil
 }
 
 func loadOldValueIDs(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, itemID int64) (map[int64]bool, error) {
