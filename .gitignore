@@ -1,0 +1,67 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+ministore
+cmd/ministore/ministore
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.txt
+coverage.html
+
+# Dependency directories (if using vendor)
+vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# SQLite databases (runtime data)
+*.db
+*.db-shm
+*.db-wal
+
+# Temporary test data
+/tmp/
+/temp/
+*.tmp
+
+# Build artifacts
+/dist/
+/build/
+/bin/
+
+# Log files
+*.log
+
+# Environment files
+.env
+.env.local
+
+# OS-specific files
+Thumbs.db
+Desktop.ini
+
+# Debug files
+debug
+__debug_bin
+
+# Profiling data
+*.prof
+*.pprof
+cpu.out
+mem.out
