@@ -18,7 +18,7 @@ type Adapter struct {
 }
 
 func New(path string) *Adapter {
-	return &Adapter{Path: path, DriverName: "sqlite3"}
+	return &Adapter{Path: path, DriverName: "sqlite"}
 }
 
 func (a *Adapter) Backend() storage.Backend {

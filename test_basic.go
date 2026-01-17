@@ -8,7 +8,7 @@ import (
 
 	"github.com/ministore/ministore/ministore"
 	"github.com/ministore/ministore/ministore/storage/sqlite"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func main() {

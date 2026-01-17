@@ -13,7 +13,7 @@ import (
 	"github.com/ministore/ministore/ministore/storage"
 	"github.com/ministore/ministore/ministore/storage/postgres"
 	"github.com/ministore/ministore/ministore/storage/sqlite"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // setArgs is a custom flag type for repeatable --set flags
