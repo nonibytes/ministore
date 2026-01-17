@@ -371,10 +371,57 @@ func (a *args) has(key string) bool {
 	return a.flags[key]
 }
 
+// requirementCheck holds info about a required argument
+type requirementCheck struct {
+	name     string   // display name (e.g., "index")
+	keys     []string // lookup keys (e.g., "i", "index")
+	optional bool     // if true, don't fail if missing
+}
+
+// checkRequired validates all required arguments and exits with clap-style error if any are missing
+func (a *args) checkRequired(cmd string, reqs ...requirementCheck) map[string]string {
+	values := make(map[string]string)
+	var missing []string
+
+	for _, req := range reqs {
+		v := a.get(req.keys...)
+		if v == "" && !req.optional {
+			missing = append(missing, "--"+req.name+" <"+strings.ToUpper(req.name)+">")
+		}
+		values[req.name] = v
+	}
+
+	if len(missing) > 0 {
+		fmt.Fprintln(os.Stderr, "error: the following required arguments were not provided:")
+		for _, m := range missing {
+			fmt.Fprintf(os.Stderr, "  %s\n", m)
+		}
+		fmt.Fprintln(os.Stderr)
+
+		// Build usage line with required args
+		var reqArgs []string
+		for _, req := range reqs {
+			if !req.optional {
+				reqArgs = append(reqArgs, "--"+req.name+" <"+strings.ToUpper(req.name)+">")
+			}
+		}
+		fmt.Fprintf(os.Stderr, "Usage: ministore %s %s\n", cmd, strings.Join(reqArgs, " "))
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "For more information, try '--help'.")
+		os.Exit(1)
+	}
+
+	return values
+}
+
+// require is a simple single-arg require (kept for backward compatibility)
 func (a *args) require(name string, keys ...string) string {
 	v := a.get(keys...)
 	if v == "" {
-		fmt.Fprintf(os.Stderr, "Error: --%s is required\n", name)
+		fmt.Fprintf(os.Stderr, "error: the following required arguments were not provided:\n")
+		fmt.Fprintf(os.Stderr, "  --%s <%s>\n", name, strings.ToUpper(name))
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "For more information, try '--help'.")
 		os.Exit(1)
 	}
 	return v
@@ -418,31 +465,33 @@ func handleIndex(ctx context.Context, cmdArgs []string) {
 
 	switch subcmd {
 	case "create":
-		indexPath := a.require("index", "i", "index")
-		schemaFile := a.require("schema", "schema")
+		vals := a.checkRequired("index create",
+			requirementCheck{name: "index", keys: []string{"i", "index"}},
+			requirementCheck{name: "schema", keys: []string{"schema"}},
+		)
 
-		schemaData, err := os.ReadFile(schemaFile)
+		schemaData, err := os.ReadFile(vals["schema"])
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading schema file: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 
 		var schema ministore.Schema
 		if err := json.Unmarshal(schemaData, &schema); err != nil {
-			fmt.Fprintf(os.Stderr, "Error parsing schema: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 
-		a.values["index"] = indexPath
+		a.values["index"] = vals["index"]
 		adapter := createAdapter(a)
 		ix, err := ministore.Create(ctx, adapter, schema, ministore.DefaultIndexOptions())
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating index: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 		defer ix.Close()
 
-		fmt.Printf("Created index: %s\n", indexPath)
+		fmt.Printf("Created index: %s\n", vals["index"])
 		fmt.Printf("Fields: %d\n", len(schema.Fields))
 
 	case "schema":
@@ -489,11 +538,15 @@ func handlePut(ctx context.Context, cmdArgs []string) {
 		return
 	}
 
-	a.require("index", "i", "index")
+	// Index is always required
+	a.checkRequired("put",
+		requirementCheck{name: "index", keys: []string{"i", "index"}},
+	)
+
 	adapter := createAdapter(a)
 	ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening index: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	defer ix.Close()
@@ -507,18 +560,22 @@ func handlePut(ctx context.Context, cmdArgs []string) {
 				continue
 			}
 			if err := ix.PutJSON(ctx, []byte(line)); err != nil {
-				fmt.Fprintf(os.Stderr, "Error putting item: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
 			count++
 		}
 		if err := scanner.Err(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading stdin: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Put %d items\n", count)
+		fmt.Printf("Imported %d items\n", count)
 	} else {
-		path := a.require("path", "p", "path")
+		path := a.get("p", "path")
+		if path == "" {
+			fmt.Fprintln(os.Stderr, "Error: Must provide --path or --json")
+			os.Exit(1)
+		}
 		doc := map[string]any{"path": path}
 		for _, kv := range a.sets {
 			parts := strings.SplitN(kv, "=", 2)
@@ -529,10 +586,10 @@ func handlePut(ctx context.Context, cmdArgs []string) {
 
 		docJSON, _ := json.Marshal(doc)
 		if err := ix.PutJSON(ctx, docJSON); err != nil {
-			fmt.Fprintf(os.Stderr, "Error putting item: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Put: %s\n", path)
+		fmt.Printf("Put %s\n", path)
 	}
 }
 
@@ -543,21 +600,24 @@ func handleGet(ctx context.Context, cmdArgs []string) {
 		return
 	}
 
-	a.require("index", "i", "index")
-	path := a.require("path", "p", "path")
+	vals := a.checkRequired("get",
+		requirementCheck{name: "index", keys: []string{"i", "index"}},
+		requirementCheck{name: "path", keys: []string{"p", "path"}},
+	)
 
+	a.values["index"] = vals["index"]
 	adapter := createAdapter(a)
 	ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening index: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	defer ix.Close()
 
-	item, err := ix.Get(ctx, path)
+	item, err := ix.Get(ctx, vals["path"])
 	if err != nil {
 		if ministore.IsKind(err, ministore.ErrNotFound) {
-			fmt.Fprintf(os.Stderr, "Not found: %s\n", path)
+			fmt.Fprintf(os.Stderr, "Error: item not found: %s\n", vals["path"])
 			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -577,21 +637,24 @@ func handlePeek(ctx context.Context, cmdArgs []string) {
 		return
 	}
 
-	a.require("index", "i", "index")
-	path := a.require("path", "p", "path")
+	vals := a.checkRequired("peek",
+		requirementCheck{name: "index", keys: []string{"i", "index"}},
+		requirementCheck{name: "path", keys: []string{"p", "path"}},
+	)
 
+	a.values["index"] = vals["index"]
 	adapter := createAdapter(a)
 	ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening index: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	defer ix.Close()
 
-	data, err := ix.Peek(ctx, path)
+	data, err := ix.Peek(ctx, vals["path"])
 	if err != nil {
 		if ministore.IsKind(err, ministore.ErrNotFound) {
-			fmt.Fprintf(os.Stderr, "Not found: %s\n", path)
+			fmt.Fprintf(os.Stderr, "Error: item not found: %s\n", vals["path"])
 			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -614,11 +677,15 @@ func handleDelete(ctx context.Context, cmdArgs []string) {
 		return
 	}
 
-	a.require("index", "i", "index")
+	// Index is required, path and where are conditional
+	a.checkRequired("delete",
+		requirementCheck{name: "index", keys: []string{"i", "index"}},
+	)
+
 	adapter := createAdapter(a)
 	ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening index: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	defer ix.Close()
@@ -627,7 +694,12 @@ func handleDelete(ctx context.Context, cmdArgs []string) {
 	where := a.get("w", "where")
 
 	if path == "" && where == "" {
-		fmt.Fprintln(os.Stderr, "Error: --path or --where required")
+		fmt.Fprintln(os.Stderr, "error: the following required arguments were not provided:")
+		fmt.Fprintln(os.Stderr, "  --path <PATH> or --where <WHERE>")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "Usage: ministore delete --index <INDEX> [--path <PATH> | --where <WHERE>]")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "For more information, try '--help'.")
 		os.Exit(1)
 	}
 
@@ -659,13 +731,16 @@ func handleSearch(ctx context.Context, cmdArgs []string) {
 		return
 	}
 
-	a.require("index", "i", "index")
-	where := a.require("where", "w", "where")
+	vals := a.checkRequired("search",
+		requirementCheck{name: "index", keys: []string{"i", "index"}},
+		requirementCheck{name: "where", keys: []string{"w", "where"}},
+	)
 
+	a.values["index"] = vals["index"]
 	adapter := createAdapter(a)
 	ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening index: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	defer ix.Close()
@@ -706,7 +781,7 @@ func handleSearch(ctx context.Context, cmdArgs []string) {
 		opts.Rank.Field = strings.TrimPrefix(rank, "field:")
 	}
 
-	result, err := ix.Search(ctx, where, opts)
+	result, err := ix.Search(ctx, vals["where"], opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -781,19 +856,21 @@ func handleDiscover(ctx context.Context, cmdArgs []string) {
 		return
 	}
 
-	a.require("index", "i", "index")
-	adapter := createAdapter(a)
-	ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening index: %v\n", err)
-		os.Exit(1)
-	}
-	defer ix.Close()
-
 	format := a.get("format")
 
 	switch subcmd {
 	case "fields":
+		a.checkRequired("discover fields",
+			requirementCheck{name: "index", keys: []string{"i", "index"}},
+		)
+		adapter := createAdapter(a)
+		ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		defer ix.Close()
+
 		fields, err := ix.DiscoverFields(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -821,14 +898,26 @@ func handleDiscover(ctx context.Context, cmdArgs []string) {
 		}
 
 	case "values":
-		field := a.require("field", "field")
+		vals := a.checkRequired("discover values",
+			requirementCheck{name: "index", keys: []string{"i", "index"}},
+			requirementCheck{name: "field", keys: []string{"field"}},
+		)
+		a.values["index"] = vals["index"]
+		adapter := createAdapter(a)
+		ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		defer ix.Close()
+
 		where := a.get("w", "where")
 		top := a.getInt("top")
 		if top == 0 {
 			top = 20
 		}
 
-		values, err := ix.DiscoverValues(ctx, field, where, top)
+		values, err := ix.DiscoverValues(ctx, vals["field"], where, top)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -840,7 +929,7 @@ func handleDiscover(ctx context.Context, cmdArgs []string) {
 			return
 		}
 
-		fmt.Printf("Top values for '%s':\n", field)
+		fmt.Printf("Top values for '%s':\n", vals["field"])
 		for _, v := range values {
 			fmt.Printf("  %s: %d\n", v.Value, v.Count)
 		}
@@ -859,19 +948,22 @@ func handleStats(ctx context.Context, cmdArgs []string) {
 		return
 	}
 
-	a.require("index", "i", "index")
-	field := a.require("field", "field")
-	where := a.get("w", "where")
+	vals := a.checkRequired("stats",
+		requirementCheck{name: "index", keys: []string{"i", "index"}},
+		requirementCheck{name: "field", keys: []string{"field"}},
+	)
 
+	a.values["index"] = vals["index"]
 	adapter := createAdapter(a)
 	ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening index: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	defer ix.Close()
 
-	stats, err := ix.Stats(ctx, field, where)
+	where := a.get("w", "where")
+	stats, err := ix.Stats(ctx, vals["field"], where)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
