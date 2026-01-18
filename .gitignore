@@ -69,5 +69,11 @@ mem.out
 
 # Code dump
 ALL.txt
-POSTGRES.mdload/data/
-bin/
+POSTGRES.md
+
+# Load test generated data
+load/data/
+
+# Stray binaries
+mini
+ministore/ministore
