@@ -378,6 +378,21 @@ type requirementCheck struct {
 	optional bool     // if true, don't fail if missing
 }
 
+// Command descriptions for helpful error messages
+var cmdDescriptions = map[string]string{
+	"put":             "Insert/update docs (--path or --json JSONL)",
+	"get":             "Get document by path (full JSON)",
+	"peek":            "Get document metadata only",
+	"delete":          "Delete by path or query",
+	"search":          "Query documents (returns matches)",
+	"stats":           "Compute min/max/avg for fields",
+	"index create":    "Create index (--schema file)",
+	"index schema":    "Show current schema",
+	"index optimize":  "Vacuum + rebuild FTS",
+	"discover fields": "List all fields with stats",
+	"discover values": "List top values for a field",
+}
+
 // checkRequired validates all required arguments and exits with clap-style error if any are missing
 func (a *args) checkRequired(cmd string, reqs ...requirementCheck) map[string]string {
 	values := make(map[string]string)
@@ -392,6 +407,12 @@ func (a *args) checkRequired(cmd string, reqs ...requirementCheck) map[string]st
 	}
 
 	if len(missing) > 0 {
+		// Show command description
+		if desc, ok := cmdDescriptions[cmd]; ok {
+			fmt.Fprintln(os.Stderr, desc)
+			fmt.Fprintln(os.Stderr)
+		}
+
 		fmt.Fprintln(os.Stderr, "error: the following required arguments were not provided:")
 		for _, m := range missing {
 			fmt.Fprintf(os.Stderr, "  %s\n", m)
@@ -405,26 +426,13 @@ func (a *args) checkRequired(cmd string, reqs ...requirementCheck) map[string]st
 				reqArgs = append(reqArgs, "--"+req.name+" <"+strings.ToUpper(req.name)+">")
 			}
 		}
-		fmt.Fprintf(os.Stderr, "Usage: ministore %s %s\n", cmd, strings.Join(reqArgs, " "))
+		fmt.Fprintf(os.Stderr, "Usage: ministore %s [OPTIONS] %s\n", cmd, strings.Join(reqArgs, " "))
 		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, "For more information, try '--help'.")
+		fmt.Fprintf(os.Stderr, "Use `ministore %s --help` for command details.\n", cmd)
 		os.Exit(1)
 	}
 
 	return values
-}
-
-// require is a simple single-arg require (kept for backward compatibility)
-func (a *args) require(name string, keys ...string) string {
-	v := a.get(keys...)
-	if v == "" {
-		fmt.Fprintf(os.Stderr, "error: the following required arguments were not provided:\n")
-		fmt.Fprintf(os.Stderr, "  --%s <%s>\n", name, strings.ToUpper(name))
-		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, "For more information, try '--help'.")
-		os.Exit(1)
-	}
-	return v
 }
 
 // Adapter creation
@@ -495,11 +503,13 @@ func handleIndex(ctx context.Context, cmdArgs []string) {
 		fmt.Printf("Fields: %d\n", len(schema.Fields))
 
 	case "schema":
-		a.require("index", "i", "index")
+		a.checkRequired("index schema",
+			requirementCheck{name: "index", keys: []string{"i", "index"}},
+		)
 		adapter := createAdapter(a)
 		ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening index: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 		defer ix.Close()
@@ -509,17 +519,19 @@ func handleIndex(ctx context.Context, cmdArgs []string) {
 		fmt.Println(string(schemaJSON))
 
 	case "optimize":
-		a.require("index", "i", "index")
+		a.checkRequired("index optimize",
+			requirementCheck{name: "index", keys: []string{"i", "index"}},
+		)
 		adapter := createAdapter(a)
 		ix, err := ministore.Open(ctx, adapter, ministore.DefaultIndexOptions())
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening index: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 		defer ix.Close()
 
 		if err := ix.Optimize(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "Error optimizing: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println("Index optimized")
@@ -573,7 +585,13 @@ func handlePut(ctx context.Context, cmdArgs []string) {
 	} else {
 		path := a.get("p", "path")
 		if path == "" {
-			fmt.Fprintln(os.Stderr, "Error: Must provide --path or --json")
+			fmt.Fprintln(os.Stderr, cmdDescriptions["put"])
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprintln(os.Stderr, "error: Must provide --path or --json")
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprintln(os.Stderr, "Usage: ministore put [OPTIONS] --index <INDEX> [--path <PATH> | --json]")
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprintln(os.Stderr, "Use `ministore put --help` for command details.")
 			os.Exit(1)
 		}
 		doc := map[string]any{"path": path}
@@ -694,12 +712,13 @@ func handleDelete(ctx context.Context, cmdArgs []string) {
 	where := a.get("w", "where")
 
 	if path == "" && where == "" {
-		fmt.Fprintln(os.Stderr, "error: the following required arguments were not provided:")
-		fmt.Fprintln(os.Stderr, "  --path <PATH> or --where <WHERE>")
+		fmt.Fprintln(os.Stderr, cmdDescriptions["delete"])
 		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, "Usage: ministore delete --index <INDEX> [--path <PATH> | --where <WHERE>]")
+		fmt.Fprintln(os.Stderr, "error: Must provide --path or --where")
 		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, "For more information, try '--help'.")
+		fmt.Fprintln(os.Stderr, "Usage: ministore delete [OPTIONS] --index <INDEX> [--path <PATH> | --where <WHERE>]")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "Use `ministore delete --help` for command details.")
 		os.Exit(1)
 	}
 
