@@ -40,7 +40,19 @@ The "needle" document has:
 
 ## Benchmark Results (100k documents)
 
-Tested on Linux, Intel CPU. Results are averages over 10 iterations.
+Tested on Linux, Intel CPU.
+
+### Import Performance
+
+| Implementation | Time | vs Rust |
+|----------------|------|---------|
+| Go (pure) | 42s | 3.6x slower |
+| Go (CGO) | 31s | 2.7x slower |
+| Rust | 12s | baseline |
+
+### Search Performance
+
+Results are averages over 10 iterations (warm cache).
 
 | Test | Go (pure) | Go (CGO) | Rust |
 |------|-----------|----------|------|

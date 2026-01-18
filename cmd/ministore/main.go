@@ -567,19 +567,23 @@ func handlePut(ctx context.Context, cmdArgs []string) {
 
 	if a.has("json") {
 		scanner := bufio.NewScanner(os.Stdin)
-		count := 0
+		batch := ministore.NewBatch()
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" {
 				continue
 			}
-			if err := ix.PutJSON(ctx, []byte(line)); err != nil {
+			if err := batch.PutJSON([]byte(line)); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
-			count++
 		}
 		if err := scanner.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		count, err := batch.Execute(ctx, ix)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
