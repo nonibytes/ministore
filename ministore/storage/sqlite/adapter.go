@@ -21,6 +21,10 @@ func New(path string) *Adapter {
 	return &Adapter{Path: path, DriverName: "sqlite"}
 }
 
+func NewWithDriver(path, driver string) *Adapter {
+	return &Adapter{Path: path, DriverName: driver}
+}
+
 func (a *Adapter) Backend() storage.Backend {
 	return storage.BackendSQLite
 }
