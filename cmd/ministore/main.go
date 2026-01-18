@@ -13,8 +13,10 @@ import (
 	"github.com/ministore/ministore/ministore/storage"
 	"github.com/ministore/ministore/ministore/storage/postgres"
 	"github.com/ministore/ministore/ministore/storage/sqlite"
-	_ "modernc.org/sqlite"
 )
+
+// sqliteDriverName is set by driver_purego.go or driver_cgo.go based on build tags
+var sqliteDriverName = "sqlite"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -448,7 +450,7 @@ func createAdapter(a *args) storage.Adapter {
 		}
 		return postgres.New(indexPath, schemaName)
 	default:
-		return sqlite.New(indexPath)
+		return sqlite.NewWithDriver(indexPath, sqliteDriverName)
 	}
 }
 
