@@ -69,4 +69,5 @@ mem.out
 
 # Code dump
 ALL.txt
-POSTGRES.md
+POSTGRES.mdload/data/
+bin/
