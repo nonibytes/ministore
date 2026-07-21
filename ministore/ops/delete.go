@@ -9,16 +9,16 @@ import (
 )
 
 // DeleteByItemID deletes an item and all its index entries by item ID
-func DeleteByItemID(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, fts storage.FTS, itemID int64) error {
+func DeleteByItemID(ctx context.Context, exec storage.SQLExecutor, sqlt storage.SQL, fts storage.FTS, itemID int64) error {
 	// 1. Load value_ids from postings for doc_freq maintenance
-	valueIDs, err := loadOldValueIDs(ctx, tx, sqlt, itemID)
+	valueIDs, err := loadOldValueIDs(ctx, exec, sqlt, itemID)
 	if err != nil {
 		return fmt.Errorf("load value_ids: %w", err)
 	}
 
 	// 2. Decrement doc_freq for each value_id (clamped at 0 for safety)
 	for valueID := range valueIDs {
-		if _, err := tx.ExecContext(ctx, sqlt.DecrementDocFreq, valueID); err != nil {
+		if _, err := exec.ExecContext(ctx, sqlt.DecrementDocFreq, valueID); err != nil {
 			return fmt.Errorf("decrement doc_freq: %w", err)
 		}
 	}
@@ -36,18 +36,18 @@ func DeleteByItemID(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, fts stora
 	}
 
 	for _, q := range queries {
-		if _, err := tx.ExecContext(ctx, q.sql, itemID); err != nil {
+		if _, err := exec.ExecContext(ctx, q.sql, itemID); err != nil {
 			return fmt.Errorf("delete %s: %w", q.name, err)
 		}
 	}
 
 	// 4. Delete FTS row
-	if err := fts.DeleteRow(ctx, tx, itemID); err != nil {
+	if err := fts.DeleteRow(ctx, exec, itemID); err != nil {
 		return fmt.Errorf("delete FTS: %w", err)
 	}
 
 	// 5. Delete items row
-	if _, err := tx.ExecContext(ctx, sqlt.DeleteItemsByID, itemID); err != nil {
+	if _, err := exec.ExecContext(ctx, sqlt.DeleteItemsByID, itemID); err != nil {
 		return fmt.Errorf("delete item: %w", err)
 	}
 

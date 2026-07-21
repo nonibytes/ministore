@@ -2,7 +2,6 @@ package ops
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -135,27 +134,27 @@ func PreparePutDocument(schema storage.Schema, doc map[string]any, dataJSON []by
 }
 
 // ExecutePut executes a prepared put operation within a transaction
-func ExecutePut(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, fts storage.FTS, schema storage.Schema, prep *PutPrepared, nowMS int64) (itemID int64, createdAtMS int64, err error) {
+func ExecutePut(ctx context.Context, exec storage.SQLExecutor, sqlt storage.SQL, fts storage.FTS, schema storage.Schema, prep *PutPrepared, nowMS int64) (itemID int64, createdAtMS int64, err error) {
 	// 1. Upsert items row
-	itemID, createdAtMS, err = upsertItem(ctx, tx, sqlt, prep.Path, prep.DataJSON, nowMS)
+	itemID, createdAtMS, err = upsertItem(ctx, exec, sqlt, prep.Path, prep.DataJSON, nowMS)
 	if err != nil {
 		return 0, 0, fmt.Errorf("upsert item: %w", err)
 	}
 
 	// 2. Load old keyword value_ids for doc_freq maintenance
-	oldValueIDs, err := loadOldValueIDs(ctx, tx, sqlt, itemID)
+	oldValueIDs, err := loadOldValueIDs(ctx, exec, sqlt, itemID)
 	if err != nil {
 		return 0, 0, fmt.Errorf("load old value_ids: %w", err)
 	}
 
 	// 3. Delete old index rows
-	if err := deleteOldIndexRows(ctx, tx, sqlt, fts, itemID); err != nil {
+	if err := deleteOldIndexRows(ctx, exec, sqlt, fts, itemID); err != nil {
 		return 0, 0, fmt.Errorf("delete old index rows: %w", err)
 	}
 
 	// 4. Insert field_present rows
 	for _, field := range prep.PresentFields {
-		if _, err := tx.ExecContext(ctx, sqlt.InsertFieldPresent, itemID, field); err != nil {
+		if _, err := exec.ExecContext(ctx, sqlt.InsertFieldPresent, itemID, field); err != nil {
 			return 0, 0, fmt.Errorf("insert field_present: %w", err)
 		}
 	}
@@ -164,20 +163,20 @@ func ExecutePut(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, fts storage.F
 	newValueIDs := make(map[int64]bool)
 	for field, values := range prep.KeywordFields {
 		for _, value := range values {
-			valueID, err := insertKeyword(ctx, tx, sqlt, field, value)
+			valueID, err := insertKeyword(ctx, exec, sqlt, field, value)
 			if err != nil {
 				return 0, 0, fmt.Errorf("insert keyword: %w", err)
 			}
 			newValueIDs[valueID] = true
 
 			// Insert posting
-			if _, err := tx.ExecContext(ctx, sqlt.InsertOrIgnoreKwPosting, field, valueID, itemID); err != nil {
+			if _, err := exec.ExecContext(ctx, sqlt.InsertOrIgnoreKwPosting, field, valueID, itemID); err != nil {
 				return 0, 0, fmt.Errorf("insert posting: %w", err)
 			}
 
 			// Increment doc_freq only if this value_id was not previously associated
 			if !oldValueIDs[valueID] {
-				if _, err := tx.ExecContext(ctx, sqlt.IncrementDocFreq, valueID); err != nil {
+				if _, err := exec.ExecContext(ctx, sqlt.IncrementDocFreq, valueID); err != nil {
 					return 0, 0, fmt.Errorf("increment doc_freq: %w", err)
 				}
 			}
@@ -187,7 +186,7 @@ func ExecutePut(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, fts storage.F
 	// 6. Decrement doc_freq for removed value_ids
 	for valueID := range oldValueIDs {
 		if !newValueIDs[valueID] {
-			if _, err := tx.ExecContext(ctx, sqlt.DecrementDocFreq, valueID); err != nil {
+			if _, err := exec.ExecContext(ctx, sqlt.DecrementDocFreq, valueID); err != nil {
 				return 0, 0, fmt.Errorf("decrement doc_freq: %w", err)
 			}
 		}
@@ -196,7 +195,7 @@ func ExecutePut(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, fts storage.F
 	// 7. Insert numbers
 	for field, values := range prep.NumberFields {
 		for _, val := range values {
-			if _, err := tx.ExecContext(ctx, sqlt.InsertFieldNumber, itemID, field, val); err != nil {
+			if _, err := exec.ExecContext(ctx, sqlt.InsertFieldNumber, itemID, field, val); err != nil {
 				return 0, 0, fmt.Errorf("insert number: %w", err)
 			}
 		}
@@ -205,7 +204,7 @@ func ExecutePut(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, fts storage.F
 	// 8. Insert dates
 	for field, values := range prep.DateFieldsMS {
 		for _, val := range values {
-			if _, err := tx.ExecContext(ctx, sqlt.InsertFieldDate, itemID, field, val); err != nil {
+			if _, err := exec.ExecContext(ctx, sqlt.InsertFieldDate, itemID, field, val); err != nil {
 				return 0, 0, fmt.Errorf("insert date: %w", err)
 			}
 		}
@@ -217,14 +216,14 @@ func ExecutePut(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, fts storage.F
 		if val {
 			intVal = 1
 		}
-		if _, err := tx.ExecContext(ctx, sqlt.InsertFieldBool, itemID, field, intVal); err != nil {
+		if _, err := exec.ExecContext(ctx, sqlt.InsertFieldBool, itemID, field, intVal); err != nil {
 			return 0, 0, fmt.Errorf("insert bool: %w", err)
 		}
 	}
 
 	// 10. Upsert FTS row
 	if fts.HasFTS(schema) {
-		if err := fts.UpsertRow(ctx, tx, itemID, schema, prep.TextCols); err != nil {
+		if err := fts.UpsertRow(ctx, exec, itemID, schema, prep.TextCols); err != nil {
 			return 0, 0, fmt.Errorf("upsert FTS: %w", err)
 		}
 	}
@@ -232,19 +231,19 @@ func ExecutePut(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, fts storage.F
 	return itemID, createdAtMS, nil
 }
 
-func upsertItem(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, path string, dataJSON []byte, nowMS int64) (itemID int64, createdAtMS int64, err error) {
+func upsertItem(ctx context.Context, exec storage.SQLExecutor, sqlt storage.SQL, path string, dataJSON []byte, nowMS int64) (itemID int64, createdAtMS int64, err error) {
 	sql, args := sqlt.UpsertItem.Build(path, dataJSON, nowMS, nowMS, false)
 
 	// SQLite template uses RETURNING id, created_at, so we must Scan.
-	if err := tx.QueryRowContext(ctx, sql, args...).Scan(&itemID, &createdAtMS); err != nil {
+	if err := scanOne(ctx, exec, sql, args, &itemID, &createdAtMS); err != nil {
 		return 0, 0, err
 	}
 	return itemID, createdAtMS, nil
 }
 
-func loadOldValueIDs(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, itemID int64) (map[int64]bool, error) {
+func loadOldValueIDs(ctx context.Context, exec storage.SQLExecutor, sqlt storage.SQL, itemID int64) (map[int64]bool, error) {
 	result := make(map[int64]bool)
-	rows, err := tx.QueryContext(ctx, sqlt.GetValueIDsByItem, itemID)
+	rows, err := exec.QueryContext(ctx, sqlt.GetValueIDsByItem, itemID)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +259,7 @@ func loadOldValueIDs(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, itemID i
 	return result, rows.Err()
 }
 
-func deleteOldIndexRows(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, fts storage.FTS, itemID int64) error {
+func deleteOldIndexRows(ctx context.Context, exec storage.SQLExecutor, sqlt storage.SQL, fts storage.FTS, itemID int64) error {
 	// Delete in specific order to avoid FK issues
 	queries := []string{
 		sqlt.DeletePostingsByItem,
@@ -271,28 +270,28 @@ func deleteOldIndexRows(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, fts s
 	}
 
 	for _, q := range queries {
-		if _, err := tx.ExecContext(ctx, q, itemID); err != nil {
+		if _, err := exec.ExecContext(ctx, q, itemID); err != nil {
 			return err
 		}
 	}
 
 	// Delete FTS row (handled specially by FTS driver)
-	if err := fts.DeleteRow(ctx, tx, itemID); err != nil {
+	if err := fts.DeleteRow(ctx, exec, itemID); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func insertKeyword(ctx context.Context, tx *sql.Tx, sqlt storage.SQL, field, value string) (int64, error) {
+func insertKeyword(ctx context.Context, exec storage.SQLExecutor, sqlt storage.SQL, field, value string) (int64, error) {
 	// Insert or ignore into dict
-	if _, err := tx.ExecContext(ctx, sqlt.InsertOrIgnoreKwDict, field, value); err != nil {
+	if _, err := exec.ExecContext(ctx, sqlt.InsertOrIgnoreKwDict, field, value); err != nil {
 		return 0, err
 	}
 
 	// Get dict ID
 	var valueID int64
-	err := tx.QueryRowContext(ctx, sqlt.GetKwDictID, field, value).Scan(&valueID)
+	err := scanOne(ctx, exec, sqlt.GetKwDictID, []any{field, value}, &valueID)
 	if err != nil {
 		return 0, err
 	}

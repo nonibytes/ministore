@@ -94,8 +94,8 @@ func (f FTS5) AddTextColumns(ctx context.Context, db *sql.DB, old, new storage.S
 	return nil
 }
 
-func (f FTS5) DeleteRow(ctx context.Context, tx *sql.Tx, itemID int64) error {
-	_, err := tx.ExecContext(ctx, "DELETE FROM search WHERE rowid = ?", itemID)
+func (f FTS5) DeleteRow(ctx context.Context, exec storage.SQLExecutor, itemID int64) error {
+	_, err := exec.ExecContext(ctx, "DELETE FROM search WHERE rowid = ?", itemID)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such table: search") {
 			return nil
@@ -105,7 +105,7 @@ func (f FTS5) DeleteRow(ctx context.Context, tx *sql.Tx, itemID int64) error {
 	return nil
 }
 
-func (f FTS5) UpsertRow(ctx context.Context, tx *sql.Tx, itemID int64, schema storage.Schema, textVals map[string]*string) error {
+func (f FTS5) UpsertRow(ctx context.Context, exec storage.SQLExecutor, itemID int64, schema storage.Schema, textVals map[string]*string) error {
 	fields := schema.TextFieldsInOrder()
 	if len(fields) == 0 {
 		return nil
@@ -127,7 +127,7 @@ func (f FTS5) UpsertRow(ctx context.Context, tx *sql.Tx, itemID int64, schema st
 		}
 	}
 	sqlStmt := fmt.Sprintf("INSERT INTO search(%s) VALUES(%s)", strings.Join(cols, ", "), strings.Join(placeholders, ", "))
-	_, err := tx.ExecContext(ctx, sqlStmt, args...)
+	_, err := exec.ExecContext(ctx, sqlStmt, args...)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such table: search") {
 			return nil

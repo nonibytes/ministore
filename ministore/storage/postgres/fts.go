@@ -94,8 +94,8 @@ func (f FTS) AddTextColumns(ctx context.Context, db *sql.DB, old, new storage.Sc
 	return nil
 }
 
-func (f FTS) DeleteRow(ctx context.Context, tx *sql.Tx, itemID int64) error {
-	_, err := tx.ExecContext(ctx, "DELETE FROM search WHERE item_id = $1", itemID)
+func (f FTS) DeleteRow(ctx context.Context, exec storage.SQLExecutor, itemID int64) error {
+	_, err := exec.ExecContext(ctx, "DELETE FROM search WHERE item_id = $1", itemID)
 	// If no FTS table exists, treat as no-op.
 	if err != nil && strings.Contains(err.Error(), "relation \"search\" does not exist") {
 		return nil
@@ -103,7 +103,7 @@ func (f FTS) DeleteRow(ctx context.Context, tx *sql.Tx, itemID int64) error {
 	return err
 }
 
-func (f FTS) UpsertRow(ctx context.Context, tx *sql.Tx, itemID int64, schema storage.Schema, textVals map[string]*string) error {
+func (f FTS) UpsertRow(ctx context.Context, exec storage.SQLExecutor, itemID int64, schema storage.Schema, textVals map[string]*string) error {
 	fields := schema.TextFieldsInOrder()
 	if len(fields) == 0 {
 		return nil
@@ -140,7 +140,7 @@ func (f FTS) UpsertRow(ctx context.Context, tx *sql.Tx, itemID int64, schema sto
 		strings.Join(sets, ", "),
 	)
 
-	_, err := tx.ExecContext(ctx, sqlStmt, args...)
+	_, err := exec.ExecContext(ctx, sqlStmt, args...)
 	if err != nil && strings.Contains(err.Error(), "relation \"search\" does not exist") {
 		return nil
 	}
