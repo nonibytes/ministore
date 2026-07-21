@@ -105,6 +105,53 @@ func TestPutGetDelete_SQLite(t *testing.T) {
 	}
 }
 
+func TestBatchMaintainsKeywordDocumentFrequency_SQLite(t *testing.T) {
+	schema := ministore.Schema{Fields: map[string]ministore.FieldSpec{
+		"tags": {Type: ministore.FieldKeyword, Multi: true},
+	}}
+	ix, _ := newIndex(t, schema)
+	ctx := context.Background()
+
+	batch := ministore.NewBatch()
+	for _, doc := range []string{
+		`{"path":"/one","tags":["a","a"]}`,
+		`{"path":"/two","tags":["a","b"]}`,
+	} {
+		if err := batch.PutJSON([]byte(doc)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if count, err := batch.Execute(ctx, ix); err != nil || count != 2 {
+		t.Fatalf("initial batch: count=%d error=%v", count, err)
+	}
+
+	assertDocFreq := func(value string, want int) {
+		t.Helper()
+		var got int
+		if err := ix.DB().QueryRowContext(ctx, "SELECT doc_freq FROM kw_dict WHERE field = ? AND value = ?", "tags", value).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("doc_freq(%q) = %d, want %d", value, got, want)
+		}
+	}
+	assertDocFreq("a", 2)
+	assertDocFreq("b", 1)
+
+	batch = ministore.NewBatch()
+	if err := batch.PutJSON([]byte(`{"path":"/one","tags":["b"]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := batch.Delete("/two"); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := batch.Execute(ctx, ix); err != nil || count != 2 {
+		t.Fatalf("mixed batch: count=%d error=%v", count, err)
+	}
+	assertDocFreq("a", 0)
+	assertDocFreq("b", 1)
+}
+
 func TestSearchFiltersAndPagination_Recency_SQLite(t *testing.T) {
 	schema := ministore.Schema{
 		Fields: map[string]ministore.FieldSpec{

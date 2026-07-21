@@ -2,6 +2,7 @@ package ops
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -135,95 +136,124 @@ func PreparePutDocument(schema storage.Schema, doc map[string]any, dataJSON []by
 
 // ExecutePut executes a prepared put operation within a transaction
 func ExecutePut(ctx context.Context, exec storage.SQLExecutor, sqlt storage.SQL, fts storage.FTS, schema storage.Schema, prep *PutPrepared, nowMS int64) (itemID int64, createdAtMS int64, err error) {
-	// 1. Upsert items row
-	itemID, createdAtMS, err = upsertItem(ctx, exec, sqlt, prep.Path, prep.DataJSON, nowMS)
+	writer := NewPutExecutor(exec, sqlt, fts, schema)
+	itemID, createdAtMS, err = writer.Execute(ctx, prep, nowMS)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := writer.FlushDocFreq(ctx); err != nil {
+		return 0, 0, err
+	}
+	return itemID, createdAtMS, nil
+}
+
+type keywordCacheKey struct {
+	field string
+	value string
+}
+
+// PutExecutor reuses dictionary lookups and batches document-frequency updates
+// across multiple puts in the same transaction.
+type PutExecutor struct {
+	exec         storage.SQLExecutor
+	sqlt         storage.SQL
+	fts          storage.FTS
+	schema       storage.Schema
+	keywordIDs   map[keywordCacheKey]int64
+	docFreqDelta map[int64]int64
+}
+
+func NewPutExecutor(exec storage.SQLExecutor, sqlt storage.SQL, fts storage.FTS, schema storage.Schema) *PutExecutor {
+	return &PutExecutor{
+		exec:         exec,
+		sqlt:         sqlt,
+		fts:          fts,
+		schema:       schema,
+		keywordIDs:   make(map[keywordCacheKey]int64),
+		docFreqDelta: make(map[int64]int64),
+	}
+}
+
+func (w *PutExecutor) Execute(ctx context.Context, prep *PutPrepared, nowMS int64) (itemID int64, createdAtMS int64, err error) {
+	itemID, createdAtMS, isNew, err := insertOrUpdateItem(ctx, w.exec, w.sqlt, prep.Path, prep.DataJSON, nowMS)
 	if err != nil {
 		return 0, 0, fmt.Errorf("upsert item: %w", err)
 	}
 
-	// 2. Load old keyword value_ids for doc_freq maintenance
-	oldValueIDs, err := loadOldValueIDs(ctx, exec, sqlt, itemID)
-	if err != nil {
-		return 0, 0, fmt.Errorf("load old value_ids: %w", err)
+	oldValueIDs := make(map[int64]bool)
+	if !isNew {
+		oldValueIDs, err = loadOldValueIDs(ctx, w.exec, w.sqlt, itemID)
+		if err != nil {
+			return 0, 0, fmt.Errorf("load old value_ids: %w", err)
+		}
+
+		if err := deleteOldIndexRows(ctx, w.exec, w.sqlt, w.fts, itemID); err != nil {
+			return 0, 0, fmt.Errorf("delete old index rows: %w", err)
+		}
 	}
 
-	// 3. Delete old index rows
-	if err := deleteOldIndexRows(ctx, exec, sqlt, fts, itemID); err != nil {
-		return 0, 0, fmt.Errorf("delete old index rows: %w", err)
-	}
-
-	// 4. Insert field_present rows
 	for _, field := range prep.PresentFields {
-		if _, err := exec.ExecContext(ctx, sqlt.InsertFieldPresent, itemID, field); err != nil {
+		if _, err := w.exec.ExecContext(ctx, w.sqlt.InsertFieldPresent, itemID, field); err != nil {
 			return 0, 0, fmt.Errorf("insert field_present: %w", err)
 		}
 	}
 
-	// 5. Insert keywords with doc_freq maintenance
 	newValueIDs := make(map[int64]bool)
 	for field, values := range prep.KeywordFields {
 		for _, value := range values {
-			valueID, err := insertKeyword(ctx, exec, sqlt, field, value)
+			valueID, err := w.keywordID(ctx, field, value)
 			if err != nil {
 				return 0, 0, fmt.Errorf("insert keyword: %w", err)
 			}
+			if newValueIDs[valueID] {
+				continue
+			}
 			newValueIDs[valueID] = true
 
-			// Insert posting
-			if _, err := exec.ExecContext(ctx, sqlt.InsertOrIgnoreKwPosting, field, valueID, itemID); err != nil {
+			if _, err := w.exec.ExecContext(ctx, w.sqlt.InsertOrIgnoreKwPosting, field, valueID, itemID); err != nil {
 				return 0, 0, fmt.Errorf("insert posting: %w", err)
 			}
 
-			// Increment doc_freq only if this value_id was not previously associated
 			if !oldValueIDs[valueID] {
-				if _, err := exec.ExecContext(ctx, sqlt.IncrementDocFreq, valueID); err != nil {
-					return 0, 0, fmt.Errorf("increment doc_freq: %w", err)
-				}
+				w.docFreqDelta[valueID]++
 			}
 		}
 	}
 
-	// 6. Decrement doc_freq for removed value_ids
 	for valueID := range oldValueIDs {
 		if !newValueIDs[valueID] {
-			if _, err := exec.ExecContext(ctx, sqlt.DecrementDocFreq, valueID); err != nil {
-				return 0, 0, fmt.Errorf("decrement doc_freq: %w", err)
-			}
+			w.docFreqDelta[valueID]--
 		}
 	}
 
-	// 7. Insert numbers
 	for field, values := range prep.NumberFields {
 		for _, val := range values {
-			if _, err := exec.ExecContext(ctx, sqlt.InsertFieldNumber, itemID, field, val); err != nil {
+			if _, err := w.exec.ExecContext(ctx, w.sqlt.InsertFieldNumber, itemID, field, val); err != nil {
 				return 0, 0, fmt.Errorf("insert number: %w", err)
 			}
 		}
 	}
 
-	// 8. Insert dates
 	for field, values := range prep.DateFieldsMS {
 		for _, val := range values {
-			if _, err := exec.ExecContext(ctx, sqlt.InsertFieldDate, itemID, field, val); err != nil {
+			if _, err := w.exec.ExecContext(ctx, w.sqlt.InsertFieldDate, itemID, field, val); err != nil {
 				return 0, 0, fmt.Errorf("insert date: %w", err)
 			}
 		}
 	}
 
-	// 9. Insert bools
 	for field, val := range prep.BoolFields {
 		intVal := 0
 		if val {
 			intVal = 1
 		}
-		if _, err := exec.ExecContext(ctx, sqlt.InsertFieldBool, itemID, field, intVal); err != nil {
+		if _, err := w.exec.ExecContext(ctx, w.sqlt.InsertFieldBool, itemID, field, intVal); err != nil {
 			return 0, 0, fmt.Errorf("insert bool: %w", err)
 		}
 	}
 
-	// 10. Upsert FTS row
-	if fts.HasFTS(schema) {
-		if err := fts.UpsertRow(ctx, exec, itemID, schema, prep.TextCols); err != nil {
+	if w.fts.HasFTS(w.schema) {
+		if err := w.fts.UpsertRow(ctx, w.exec, itemID, w.schema, prep.TextCols); err != nil {
 			return 0, 0, fmt.Errorf("upsert FTS: %w", err)
 		}
 	}
@@ -231,14 +261,48 @@ func ExecutePut(ctx context.Context, exec storage.SQLExecutor, sqlt storage.SQL,
 	return itemID, createdAtMS, nil
 }
 
-func upsertItem(ctx context.Context, exec storage.SQLExecutor, sqlt storage.SQL, path string, dataJSON []byte, nowMS int64) (itemID int64, createdAtMS int64, err error) {
-	sql, args := sqlt.UpsertItem.Build(path, dataJSON, nowMS, nowMS, false)
-
-	// SQLite template uses RETURNING id, created_at, so we must Scan.
-	if err := scanOne(ctx, exec, sql, args, &itemID, &createdAtMS); err != nil {
-		return 0, 0, err
+func (w *PutExecutor) FlushDocFreq(ctx context.Context) error {
+	for valueID, delta := range w.docFreqDelta {
+		if delta == 0 {
+			delete(w.docFreqDelta, valueID)
+			continue
+		}
+		if _, err := w.exec.ExecContext(ctx, w.sqlt.AdjustDocFreq, valueID, delta); err != nil {
+			return fmt.Errorf("adjust doc_freq: %w", err)
+		}
+		delete(w.docFreqDelta, valueID)
 	}
-	return itemID, createdAtMS, nil
+	return nil
+}
+
+func (w *PutExecutor) keywordID(ctx context.Context, field, value string) (int64, error) {
+	key := keywordCacheKey{field: field, value: value}
+	if valueID, ok := w.keywordIDs[key]; ok {
+		return valueID, nil
+	}
+	valueID, err := insertKeyword(ctx, w.exec, w.sqlt, field, value)
+	if err != nil {
+		return 0, err
+	}
+	w.keywordIDs[key] = valueID
+	return valueID, nil
+}
+
+func insertOrUpdateItem(ctx context.Context, exec storage.SQLExecutor, sqlt storage.SQL, path string, dataJSON []byte, nowMS int64) (itemID int64, createdAtMS int64, isNew bool, err error) {
+	insertSQL, insertArgs := sqlt.UpsertItem.BuildInsert(path, dataJSON, nowMS, nowMS)
+	err = scanOne(ctx, exec, insertSQL, insertArgs, &itemID, &createdAtMS)
+	if err == nil {
+		return itemID, createdAtMS, true, nil
+	}
+	if err != sql.ErrNoRows {
+		return 0, 0, false, err
+	}
+
+	sql, args := sqlt.UpsertItem.Build(path, dataJSON, nowMS, nowMS, false)
+	if err := scanOne(ctx, exec, sql, args, &itemID, &createdAtMS); err != nil {
+		return 0, 0, false, err
+	}
+	return itemID, createdAtMS, false, nil
 }
 
 func loadOldValueIDs(ctx context.Context, exec storage.SQLExecutor, sqlt storage.SQL, itemID int64) (map[int64]bool, error) {

@@ -433,6 +433,7 @@ func (ix *Index) Batch(ctx context.Context, b Batch) (int, error) {
 	nowMS := ix.nowMS()
 	statements := ops.NewStatementCache(tx)
 	defer statements.Close()
+	putExecutor := ops.NewPutExecutor(statements, sqlt, fts, ix.schema.AsStorageSchema())
 
 	count := 0
 	for _, op := range b.ops {
@@ -442,11 +443,14 @@ func (ix *Index) Batch(ctx context.Context, b Batch) (int, error) {
 			if err != nil {
 				return count, Wrap(ErrSchema, "prepare put", err)
 			}
-			_, _, err = ops.ExecutePut(ctx, statements, sqlt, fts, ix.schema.AsStorageSchema(), prep, nowMS)
+			_, _, err = putExecutor.Execute(ctx, prep, nowMS)
 			if err != nil {
 				return count, Wrap(ErrSQL, "execute put", err)
 			}
 		case batchDelete:
+			if err := putExecutor.FlushDocFreq(ctx); err != nil {
+				return count, Wrap(ErrSQL, "flush document frequencies", err)
+			}
 			// Find item ID
 			var itemID int64
 			var createdAt int64
@@ -465,6 +469,9 @@ func (ix *Index) Batch(ctx context.Context, b Batch) (int, error) {
 		count++
 	}
 
+	if err := putExecutor.FlushDocFreq(ctx); err != nil {
+		return count, Wrap(ErrSQL, "flush document frequencies", err)
+	}
 	if err := statements.Close(); err != nil {
 		return count, Wrap(ErrSQL, "close prepared statements", err)
 	}

@@ -76,6 +76,7 @@ type SQL struct {
 	GetValueIDsByItem string
 	IncrementDocFreq  string
 	DecrementDocFreq  string
+	AdjustDocFreq     string
 
 	DeleteSearchRow      string
 	DeletePresentByItem  string
@@ -101,6 +102,7 @@ type SQL struct {
 // UpsertItemSQL handles item insertion/update
 type UpsertItemSQL interface {
 	Build(path string, dataJSON []byte, createdAtMS, updatedAtMS int64, nowMode bool) (string, []any)
+	BuildInsert(path string, dataJSON []byte, createdAtMS, updatedAtMS int64) (string, []any)
 }
 
 // FTS handles full-text search operations
