@@ -13,9 +13,10 @@ const (
 )
 
 type BatchOp struct {
-	Kind BatchOpKind
-	Doc  []byte // for put
-	Path string // for delete
+	Kind     BatchOpKind
+	Document map[string]any // for put
+	DataJSON []byte         // for put
+	Path     string         // for delete
 }
 
 type Batch struct {
@@ -35,7 +36,11 @@ func (b *Batch) PutJSON(doc []byte) error {
 	if !ok || p == "" {
 		return New(ErrSchema, "document must contain non-empty 'path'")
 	}
-	b.ops = append(b.ops, BatchOp{Kind: batchPut, Doc: doc})
+	b.ops = append(b.ops, BatchOp{
+		Kind:     batchPut,
+		Document: m,
+		DataJSON: append([]byte(nil), doc...),
+	})
 	return nil
 }
 

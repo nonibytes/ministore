@@ -436,7 +436,7 @@ func (ix *Index) Batch(ctx context.Context, b Batch) (int, error) {
 	for _, op := range b.ops {
 		switch op.Kind {
 		case batchPut:
-			prep, err := ops.PreparePut(ix.schema.AsStorageSchema(), op.Doc)
+			prep, err := ops.PreparePutDocument(ix.schema.AsStorageSchema(), op.Document, op.DataJSON)
 			if err != nil {
 				return count, Wrap(ErrSchema, "prepare put", err)
 			}

@@ -29,7 +29,12 @@ func PreparePut(schema storage.Schema, docJSON []byte) (*PutPrepared, error) {
 	if err := json.Unmarshal(docJSON, &doc); err != nil {
 		return nil, fmt.Errorf("invalid JSON document: %w", err)
 	}
+	return PreparePutDocument(schema, doc, docJSON)
+}
 
+// PreparePutDocument validates and extracts fields from an already decoded
+// document. dataJSON is the representation persisted in the items table.
+func PreparePutDocument(schema storage.Schema, doc map[string]any, dataJSON []byte) (*PutPrepared, error) {
 	// Extract path
 	pathVal, ok := doc["path"]
 	if !ok {
@@ -42,7 +47,7 @@ func PreparePut(schema storage.Schema, docJSON []byte) (*PutPrepared, error) {
 
 	prep := &PutPrepared{
 		Path:          path,
-		DataJSON:      docJSON,
+		DataJSON:      dataJSON,
 		TextCols:      make(map[string]*string),
 		KeywordFields: make(map[string][]string),
 		NumberFields:  make(map[string][]float64),
