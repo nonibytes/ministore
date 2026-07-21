@@ -1,6 +1,7 @@
 # Ministore Load Tests
 
-Needle-in-a-haystack benchmarks for measuring search performance at scale.
+Needle-in-a-haystack benchmarks for measuring import performance, cold CLI
+latency, and hot search performance at scale.
 
 ## Usage
 
@@ -26,6 +27,14 @@ Needle-in-a-haystack benchmarks for measuring search performance at scale.
 4. **Complex query** - FTS term + keyword filter
 5. **Broad search** - Return 100 results from ~10% of corpus
 
+Each search workload is reported in two modes:
+
+- **Cold CLI latency** starts a new process and opens/verifies the index for
+  every iteration. This represents command-line usage.
+- **Hot search latency** opens the index once, warms it up, and then executes
+  100 searches through the Go API. This isolates query execution from process
+  startup and index-opening overhead.
+
 ## Generated Data
 
 - `data/100k.jsonl` - 100,000 document corpus (~15MB)
@@ -50,7 +59,7 @@ Tested on Linux, Intel CPU.
 | Go (CGO) | 31s | 2.7x slower |
 | Rust | 12s | baseline |
 
-### Search Performance
+### Cold CLI Search Performance
 
 Results are averages over 10 iterations (warm cache).
 
@@ -61,6 +70,16 @@ Results are averages over 10 iterations (warm cache).
 | Number range | 20ms | 17ms | 13ms |
 | Complex query | 19ms | 18ms | 13ms |
 | Broad (100 results) | 50ms | 50ms | 53ms |
+
+These historical figures include process startup and index verification. Run
+the current benchmark to obtain results for the checked-out revision and local
+machine.
+
+### Hot Search Performance
+
+The load test now prints a second table of measurements taken against one open
+index. Use these figures when comparing the query engines themselves or when
+estimating long-running service performance.
 
 ### Key Observations
 

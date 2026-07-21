@@ -11,6 +11,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="${SCRIPT_DIR}/.."
 MINISTORE="${PROJECT_DIR}/bin/ministore"
+SEARCH_BENCH="${PROJECT_DIR}/bin/ministore-search-bench"
+COMMAND_BENCH="${PROJECT_DIR}/bin/ministore-command-bench"
 LOAD_DIR="${SCRIPT_DIR}/data"
 
 # Colors for output
@@ -25,12 +27,12 @@ success() { echo -e "${GREEN}✓${NC} $1"; }
 warn() { echo -e "${YELLOW}⚠${NC} $1"; }
 error() { echo -e "${RED}✗${NC} $1"; }
 
-# Ensure binary exists
-if [ ! -f "$MINISTORE" ]; then
-    log "Building ministore binary..."
-    mkdir -p "${PROJECT_DIR}/bin"
-    (cd "$PROJECT_DIR" && go build -o bin/ministore ./cmd/ministore)
-fi
+# Always build so benchmark results cannot silently use stale code.
+log "Building benchmark binaries..."
+mkdir -p "${PROJECT_DIR}/bin"
+(cd "$PROJECT_DIR" && go build -o bin/ministore ./cmd/ministore)
+(cd "$PROJECT_DIR" && go build -o bin/ministore-search-bench ./load/cmd/searchbench)
+(cd "$PROJECT_DIR" && go build -o bin/ministore-command-bench ./load/cmd/commandbench)
 
 mkdir -p "$LOAD_DIR"
 
@@ -135,78 +137,69 @@ run_benchmark() {
     echo "  BENCHMARK: ${name} corpus"
     echo "═══════════════════════════════════════════════════════════════"
 
-    # Warmup
-    log "Warming up (3 queries)..."
-    for i in {1..3}; do
-        $MINISTORE search -i "$db_file" -w "category:cat5" --limit 1 > /dev/null 2>&1
-    done
-
     # Test 1: FTS search for needle (unique term)
     log "Test 1: FTS search for unique needle term..."
-    local total=0
-    for i in $(seq 1 $iterations); do
-        local start=$(date +%s.%N)
-        local result=$($MINISTORE search -i "$db_file" -w "NEEDLE_UNIQUE_XYZ_12345" --limit 5 --format json 2>/dev/null)
-        local end=$(date +%s.%N)
-        local elapsed=$(echo "($end - $start) * 1000" | bc)
-        total=$(echo "$total + $elapsed" | bc)
-    done
-    local avg=$(echo "scale=3; $total / $iterations" | bc)
+    local avg
+    avg=$($COMMAND_BENCH -iterations "$iterations" -- $MINISTORE search -i "$db_file" -w "NEEDLE_UNIQUE_XYZ_12345" --limit 5 --format json)
     success "FTS needle search: avg ${avg}ms over ${iterations} iterations"
 
     # Test 2: Keyword exact match
     log "Test 2: Keyword exact match for needle category..."
-    total=0
-    for i in $(seq 1 $iterations); do
-        local start=$(date +%s.%N)
-        $MINISTORE search -i "$db_file" -w "category:needle" --limit 5 > /dev/null 2>&1
-        local end=$(date +%s.%N)
-        local elapsed=$(echo "($end - $start) * 1000" | bc)
-        total=$(echo "$total + $elapsed" | bc)
-    done
-    avg=$(echo "scale=3; $total / $iterations" | bc)
+    avg=$($COMMAND_BENCH -iterations "$iterations" -- $MINISTORE search -i "$db_file" -w "category:needle" --limit 5)
     success "Keyword needle search: avg ${avg}ms over ${iterations} iterations"
 
     # Test 3: Number comparison (priority = 999)
     log "Test 3: Number comparison for needle priority..."
-    total=0
-    for i in $(seq 1 $iterations); do
-        local start=$(date +%s.%N)
-        $MINISTORE search -i "$db_file" -w "priority>900" --limit 5 > /dev/null 2>&1
-        local end=$(date +%s.%N)
-        local elapsed=$(echo "($end - $start) * 1000" | bc)
-        total=$(echo "$total + $elapsed" | bc)
-    done
-    avg=$(echo "scale=3; $total / $iterations" | bc)
+    avg=$($COMMAND_BENCH -iterations "$iterations" -- $MINISTORE search -i "$db_file" -w "priority>900" --limit 5)
     success "Number range needle search: avg ${avg}ms over ${iterations} iterations"
 
     # Test 4: Complex query (FTS + keyword filter)
     log "Test 4: Complex query (FTS + keyword)..."
-    total=0
-    for i in $(seq 1 $iterations); do
-        local start=$(date +%s.%N)
-        $MINISTORE search -i "$db_file" -w "MAGIC_HAYSTACK_FINDER category:needle" --limit 5 > /dev/null 2>&1
-        local end=$(date +%s.%N)
-        local elapsed=$(echo "($end - $start) * 1000" | bc)
-        total=$(echo "$total + $elapsed" | bc)
-    done
-    avg=$(echo "scale=3; $total / $iterations" | bc)
+    avg=$($COMMAND_BENCH -iterations "$iterations" -- $MINISTORE search -i "$db_file" -w "MAGIC_HAYSTACK_FINDER category:needle" --limit 5)
     success "Complex needle search: avg ${avg}ms over ${iterations} iterations"
 
     # Test 5: Broad query (should return many results)
     log "Test 5: Broad query (category:cat5, expect ~10% of docs)..."
-    total=0
-    for i in $(seq 1 $iterations); do
-        local start=$(date +%s.%N)
-        $MINISTORE search -i "$db_file" -w "category:cat5" --limit 100 > /dev/null 2>&1
-        local end=$(date +%s.%N)
-        local elapsed=$(echo "($end - $start) * 1000" | bc)
-        total=$(echo "$total + $elapsed" | bc)
-    done
-    avg=$(echo "scale=3; $total / $iterations" | bc)
+    avg=$($COMMAND_BENCH -iterations "$iterations" -- $MINISTORE search -i "$db_file" -w "category:cat5" --limit 100)
     success "Broad search (100 results): avg ${avg}ms over ${iterations} iterations"
 
     echo ""
+}
+
+# Run searches repeatedly against one open Index. This measures query execution
+# separately from CLI startup, database opening, and schema verification.
+run_hot_benchmark() {
+    local name=$1
+    local db_file="${LOAD_DIR}/${name}.db"
+    local iterations=100
+
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "  HOT SEARCH BENCHMARK: ${name} corpus (one open index)"
+    echo "═══════════════════════════════════════════════════════════════"
+
+    local output
+    local average
+
+    output=$($SEARCH_BENCH -index "$db_file" -query "NEEDLE_UNIQUE_XYZ_12345" -limit 5 -iterations "$iterations")
+    average=${output%%$'\t'*}
+    success "FTS needle search: avg ${average}ms over ${iterations} iterations"
+
+    output=$($SEARCH_BENCH -index "$db_file" -query "category:needle" -limit 5 -iterations "$iterations")
+    average=${output%%$'\t'*}
+    success "Keyword needle search: avg ${average}ms over ${iterations} iterations"
+
+    output=$($SEARCH_BENCH -index "$db_file" -query "priority>900" -limit 5 -iterations "$iterations")
+    average=${output%%$'\t'*}
+    success "Number range needle search: avg ${average}ms over ${iterations} iterations"
+
+    output=$($SEARCH_BENCH -index "$db_file" -query "MAGIC_HAYSTACK_FINDER category:needle" -limit 5 -iterations "$iterations")
+    average=${output%%$'\t'*}
+    success "Complex needle search: avg ${average}ms over ${iterations} iterations"
+
+    output=$($SEARCH_BENCH -index "$db_file" -query "category:cat5" -limit 100 -iterations "$iterations")
+    average=${output%%$'\t'*}
+    success "Broad search (100 results): avg ${average}ms over ${iterations} iterations"
 }
 
 # Main
@@ -232,6 +225,7 @@ main() {
                 log "Using existing 100k index"
             fi
             run_benchmark "100k"
+            run_hot_benchmark "100k"
             ;;
         1m)
             if [ ! -f "${LOAD_DIR}/1m.jsonl" ]; then
@@ -245,6 +239,7 @@ main() {
                 log "Using existing 1M index"
             fi
             run_benchmark "1m"
+            run_hot_benchmark "1m"
             ;;
         both)
             $0 100k
