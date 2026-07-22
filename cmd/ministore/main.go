@@ -806,6 +806,11 @@ func handleSearch(ctx context.Context, cmdArgs []string) {
 		opts.Rank.Kind = ministore.RankField
 		opts.Rank.Field = strings.TrimPrefix(rank, "field:")
 	}
+	format, err := ministore.ParseSearchOutputFormat(a.get("format"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
 	started := time.Now()
 	result, err := ix.Search(ctx, vals["where"], opts)
@@ -815,11 +820,6 @@ func handleSearch(ctx context.Context, cmdArgs []string) {
 	}
 
 	elapsed := time.Since(started)
-	format, err := ministore.ParseSearchOutputFormat(a.get("format"))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
 	formatted, err := ministore.FormatSearchResults(result, ministore.SearchOutputOptions{
 		Format:  format,
 		Elapsed: &elapsed,
