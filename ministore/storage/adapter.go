@@ -49,6 +49,13 @@ type FieldSpec struct {
 	Weight *float64
 }
 
+// SQLExecutor is the subset of database/sql used by storage operations. Both
+// sql.Tx and transaction-scoped prepared statement caches implement it.
+type SQLExecutor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 type TextField struct {
 	Name   string
 	Weight float64
@@ -69,6 +76,7 @@ type SQL struct {
 	GetValueIDsByItem string
 	IncrementDocFreq  string
 	DecrementDocFreq  string
+	AdjustDocFreq     string
 
 	DeleteSearchRow      string
 	DeletePresentByItem  string
@@ -94,6 +102,7 @@ type SQL struct {
 // UpsertItemSQL handles item insertion/update
 type UpsertItemSQL interface {
 	Build(path string, dataJSON []byte, createdAtMS, updatedAtMS int64, nowMode bool) (string, []any)
+	BuildInsert(path string, dataJSON []byte, createdAtMS, updatedAtMS int64) (string, []any)
 }
 
 // FTS handles full-text search operations
@@ -103,8 +112,8 @@ type FTS interface {
 	VerifyFTS(ctx context.Context, db *sql.DB, schema Schema) error
 	AddTextColumns(ctx context.Context, db *sql.DB, old, new Schema) error
 
-	DeleteRow(ctx context.Context, tx *sql.Tx, itemID int64) error
-	UpsertRow(ctx context.Context, tx *sql.Tx, itemID int64, schema Schema, textVals map[string]*string) error
+	DeleteRow(ctx context.Context, exec SQLExecutor, itemID int64) error
+	UpsertRow(ctx context.Context, exec SQLExecutor, itemID int64, schema Schema, textVals map[string]*string) error
 
 	// CompileTextPredicate returns SQL body (without WITH name) that yields item_id
 	CompileTextPredicate(b Builder, schema Schema, pred TextPredicate) (sql string, args []any, err error)

@@ -288,14 +288,21 @@ ministore index create -i "postgres://user:pass@localhost/db" \
 
 ### Benchmark Results (100k documents)
 
+Imports use freshly created databases. Search figures below are cold CLI
+latencies, including process startup and index opening.
+
 | Operation | Go (pure) | Go (CGO) | Rust |
 |-----------|-----------|----------|------|
-| **Import** | 42s | 31s | 12s |
-| FTS search | 19ms | 17ms | 12ms |
-| Keyword exact | 18ms | 15ms | 11ms |
-| Number range | 20ms | 17ms | 13ms |
-| Complex query | 19ms | 18ms | 13ms |
-| Broad (100 results) | 50ms | 50ms | 53ms |
+| **Import** | 27.6s | 21.8s | 9.9s |
+| FTS search | 14.6ms | 12.5ms | 8.8ms |
+| Keyword exact | 11.5ms | 12.3ms | 7.4ms |
+| Number range | 12.4ms | 13.0ms | 7.8ms |
+| Complex query | 14.4ms | 11.0ms | 8.9ms |
+| Broad (100 results) | 39.0ms | 29.7ms | 35.9ms |
+
+The benchmark also reports hot query latency against one open index, separating
+query execution from CLI startup. See the [load benchmark](load/README.md) for
+methodology and reproduction instructions.
 
 ### Building with CGO (Optional)
 

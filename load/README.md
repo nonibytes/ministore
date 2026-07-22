@@ -1,6 +1,7 @@
 # Ministore Load Tests
 
-Needle-in-a-haystack benchmarks for measuring search performance at scale.
+Needle-in-a-haystack benchmarks for measuring import performance, cold CLI
+latency, and hot search performance at scale.
 
 ## Usage
 
@@ -26,6 +27,14 @@ Needle-in-a-haystack benchmarks for measuring search performance at scale.
 4. **Complex query** - FTS term + keyword filter
 5. **Broad search** - Return 100 results from ~10% of corpus
 
+Each search workload is reported in two modes:
+
+- **Cold CLI latency** starts a new process and opens/verifies the index for
+  every iteration. This represents command-line usage.
+- **Hot search latency** opens the index once, warms it up, and then executes
+  100 searches through the Go API. This isolates query execution from process
+  startup and index-opening overhead.
+
 ## Generated Data
 
 - `data/100k.jsonl` - 100,000 document corpus (~15MB)
@@ -40,33 +49,50 @@ The "needle" document has:
 
 ## Benchmark Results (100k documents)
 
-Tested on Linux, Intel CPU.
+Measured on Linux with warm filesystem caches. Import results use freshly
+created databases. Cold search results include process startup and index open;
+hot results printed by the script exclude both.
 
 ### Import Performance
 
 | Implementation | Time | vs Rust |
 |----------------|------|---------|
-| Go (pure) | 42s | 3.6x slower |
-| Go (CGO) | 31s | 2.7x slower |
-| Rust | 12s | baseline |
+| Go (pure) | 27.6s | 2.8x slower |
+| Go (CGO) | 21.8s | 2.2x slower |
+| Rust | 9.9s | baseline |
 
-### Search Performance
+### Cold CLI Search Performance
 
 Results are averages over 10 iterations (warm cache).
 
 | Test | Go (pure) | Go (CGO) | Rust |
 |------|-----------|----------|------|
-| FTS needle | 19ms | 17ms | 12ms |
-| Keyword exact | 18ms | 15ms | 11ms |
-| Number range | 20ms | 17ms | 13ms |
-| Complex query | 19ms | 18ms | 13ms |
-| Broad (100 results) | 50ms | 50ms | 53ms |
+| FTS needle | 14.6ms | 12.5ms | 8.8ms |
+| Keyword exact | 11.5ms | 12.3ms | 7.4ms |
+| Number range | 12.4ms | 13.0ms | 7.8ms |
+| Complex query | 14.4ms | 11.0ms | 8.9ms |
+| Broad (100 results) | 39.0ms | 29.7ms | 35.9ms |
+
+Run the benchmark locally when making decisions from small latency
+differences; process scheduling and filesystem state can move cold results by
+several milliseconds.
+
+### Hot Search Performance
+
+The load test now prints a second table of measurements taken against one open
+index. Use these figures when comparing the query engines themselves or when
+estimating long-running service performance.
 
 ### Key Observations
 
-- **Pure Go driver** (default): ~1.5-2x slower than Rust for simple queries
-- **CGO driver**: ~1.3-1.4x slower than Rust for simple queries
-- **Broad queries**: Go matches or beats Rust when returning many results
+- Batched imports now reuse prepared statements, skip update cleanup for new
+  documents, cache keyword IDs, and aggregate document-frequency changes.
+- The pure-Go and CGO import paths are respectively about 34% and 30% faster
+  than the previous implementation on this workload.
+- Most remaining simple-query CLI latency is process startup and index opening,
+  not query execution; the hot benchmark reports sub-millisecond needle
+  searches on the same 100k index.
+- Broad queries match or beat Rust when returning many results.
 - Index format is **fully compatible** between Go and Rust versions
 
 ### Why Pure Go is Default

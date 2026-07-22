@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/ministore/ministore/ministore/storage"
@@ -38,26 +39,40 @@ func (f FTS5) VerifyFTS(ctx context.Context, db *sql.DB, schema storage.Schema) 
 		return nil
 	}
 
-	// For FTS5 virtual tables, we need to query the table itself to verify columns
-	// PRAGMA table_info doesn't work reliably for virtual tables
-	// Instead, we'll try a simple query to verify the table exists and has the right structure
-	var count int
-	err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM search WHERE 0=1").Scan(&count)
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info(search)")
 	if err != nil {
-		// Table doesn't exist or is malformed
-		if strings.Contains(err.Error(), "no such table") {
-			return fmt.Errorf("FTS table 'search' does not exist")
-		}
 		return fmt.Errorf("FTS table verification failed: %w", err)
 	}
+	defer rows.Close()
 
-	// Verify we can query each expected column
-	for _, tf := range fields {
-		testQuery := fmt.Sprintf("SELECT %s FROM search WHERE 0=1", tf.Name)
-		_, err := db.QueryContext(ctx, testQuery)
-		if err != nil {
-			return fmt.Errorf("FTS column '%s' not found or invalid: %w", tf.Name, err)
+	actual := make([]string, 0, len(fields))
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			columnType string
+			notNull    int
+			defaultVal any
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &primaryKey); err != nil {
+			return fmt.Errorf("scan FTS columns: %w", err)
 		}
+		actual = append(actual, name)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read FTS columns: %w", err)
+	}
+
+	expected := make([]string, 0, len(fields))
+	for _, field := range fields {
+		expected = append(expected, field.Name)
+	}
+	if len(actual) == 0 {
+		return fmt.Errorf("FTS table 'search' does not exist")
+	}
+	if !slices.Equal(actual, expected) {
+		return fmt.Errorf("FTS columns mismatch: expected %v, found %v", expected, actual)
 	}
 
 	return nil
@@ -79,8 +94,8 @@ func (f FTS5) AddTextColumns(ctx context.Context, db *sql.DB, old, new storage.S
 	return nil
 }
 
-func (f FTS5) DeleteRow(ctx context.Context, tx *sql.Tx, itemID int64) error {
-	_, err := tx.ExecContext(ctx, "DELETE FROM search WHERE rowid = ?", itemID)
+func (f FTS5) DeleteRow(ctx context.Context, exec storage.SQLExecutor, itemID int64) error {
+	_, err := exec.ExecContext(ctx, "DELETE FROM search WHERE rowid = ?", itemID)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such table: search") {
 			return nil
@@ -90,7 +105,7 @@ func (f FTS5) DeleteRow(ctx context.Context, tx *sql.Tx, itemID int64) error {
 	return nil
 }
 
-func (f FTS5) UpsertRow(ctx context.Context, tx *sql.Tx, itemID int64, schema storage.Schema, textVals map[string]*string) error {
+func (f FTS5) UpsertRow(ctx context.Context, exec storage.SQLExecutor, itemID int64, schema storage.Schema, textVals map[string]*string) error {
 	fields := schema.TextFieldsInOrder()
 	if len(fields) == 0 {
 		return nil
@@ -112,7 +127,7 @@ func (f FTS5) UpsertRow(ctx context.Context, tx *sql.Tx, itemID int64, schema st
 		}
 	}
 	sqlStmt := fmt.Sprintf("INSERT INTO search(%s) VALUES(%s)", strings.Join(cols, ", "), strings.Join(placeholders, ", "))
-	_, err := tx.ExecContext(ctx, sqlStmt, args...)
+	_, err := exec.ExecContext(ctx, sqlStmt, args...)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such table: search") {
 			return nil
