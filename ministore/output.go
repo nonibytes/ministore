@@ -61,7 +61,11 @@ func FormatSearchResults(page SearchResultPage, options SearchOutputOptions) (st
 
 func formatSearchPretty(page SearchResultPage, elapsed *time.Duration) (string, error) {
 	var output strings.Builder
-	fmt.Fprintf(&output, "Found %d items", len(page.Items))
+	itemLabel := "items"
+	if len(page.Items) == 1 {
+		itemLabel = "item"
+	}
+	fmt.Fprintf(&output, "Found %d %s", len(page.Items), itemLabel)
 	if elapsed != nil {
 		fmt.Fprintf(&output, " in %dms", elapsed.Milliseconds())
 	}

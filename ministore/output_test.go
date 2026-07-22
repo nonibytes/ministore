@@ -50,6 +50,17 @@ func TestFormatSearchResultsPaths(t *testing.T) {
 	}
 }
 
+func TestFormatSearchResultsPrettyUsesSingularItem(t *testing.T) {
+	page := SearchResultPage{Items: [][]byte{[]byte(`{"path":"/one"}`)}}
+	formatted, err := FormatSearchResults(page, SearchOutputOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if formatted != "Found 1 item\n- /one\n" {
+		t.Fatalf("unexpected singular output: %q", formatted)
+	}
+}
+
 func TestFormatSearchResultsJSON(t *testing.T) {
 	formatted, err := FormatSearchResults(sampleSearchPage(), SearchOutputOptions{Format: SearchOutputJSON})
 	if err != nil {
