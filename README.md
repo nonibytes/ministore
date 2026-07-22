@@ -51,8 +51,9 @@ ministore put -i docs.db --path /blog/hello-world \
   --set tags=rust,tutorial \
   --set published=2024-01-15
 
-# Search
-ministore search -i docs.db -w "hello AND tags:rust"
+# Search with human-readable fields
+ministore search -i docs.db -w "hello AND tags:rust" \
+  --show title,tags --format pretty
 
 # Import from JSONL (stdin)
 cat documents.jsonl | ministore put -i docs.db --json
@@ -101,16 +102,39 @@ func main() {
     }
 
     // Search
-    results, err := ix.Search(ctx, "go programming", ministore.SearchOptions{Limit: 10})
+    results, err := ix.Search(ctx, "go programming", ministore.SearchOptions{
+        Limit: 10,
+        Show: ministore.OutputFieldSelector{
+            Kind: ministore.ShowFields,
+            Fields: []string{"title", "tags"},
+        },
+    })
     if err != nil {
         panic(err)
     }
 
-    for _, item := range results.Items {
-        fmt.Printf("%s: %s\n", item.Path, item.Data["title"])
+    output, err := ministore.FormatSearchResults(results, ministore.SearchOutputOptions{
+        Format: ministore.SearchOutputPretty,
+    })
+    if err != nil {
+        panic(err)
     }
+    fmt.Print(output)
 }
 ```
+
+The CLI and library share the same formatter. `pretty` produces compact text,
+`paths` emits one path per line, and `json` emits a stable page envelope:
+
+```text
+Found 1 item
+- /blog/hello-world
+  tags: ["go","tutorial"]
+  title: Hello World
+```
+
+Use `ministore.SearchOutputPaths` for pipelines that need plain path lines, or
+`ministore.SearchOutputJSON` for machine-readable output.
 
 ## Query Language
 

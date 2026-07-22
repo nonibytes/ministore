@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ministore/ministore/ministore"
 	"github.com/ministore/ministore/ministore/storage"
@@ -805,62 +806,29 @@ func handleSearch(ctx context.Context, cmdArgs []string) {
 		opts.Rank.Kind = ministore.RankField
 		opts.Rank.Field = strings.TrimPrefix(rank, "field:")
 	}
+	format, err := ministore.ParseSearchOutputFormat(a.get("format"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 
+	started := time.Now()
 	result, err := ix.Search(ctx, vals["where"], opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	format := a.get("format")
-	if format == "json" {
-		output := map[string]any{
-			"items":    make([]any, 0, len(result.Items)),
-			"has_more": result.HasMore,
-		}
-		if result.NextCursor != "" {
-			output["next_cursor"] = result.NextCursor
-		}
-		for _, item := range result.Items {
-			var obj any
-			if json.Unmarshal(item, &obj) == nil {
-				output["items"] = append(output["items"].([]any), obj)
-			}
-		}
-		jsonOut, _ := json.Marshal(output)
-		fmt.Println(string(jsonOut))
-		return
+	elapsed := time.Since(started)
+	formatted, err := ministore.FormatSearchResults(result, ministore.SearchOutputOptions{
+		Format:  format,
+		Elapsed: &elapsed,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
-
-	// Pretty format
-	if opts.Explain {
-		fmt.Println("=== Query Plan ===")
-		for _, step := range result.ExplainSteps {
-			fmt.Printf("  %s\n", step)
-		}
-		fmt.Println("\n=== SQL ===")
-		fmt.Println(result.ExplainSQL)
-		fmt.Println("\n=== Results ===")
-	}
-
-	for _, item := range result.Items {
-		var obj any
-		if json.Unmarshal(item, &obj) == nil {
-			pretty, _ := json.MarshalIndent(obj, "", "  ")
-			fmt.Println(string(pretty))
-		} else {
-			fmt.Println(string(item))
-		}
-	}
-
-	fmt.Printf("\n--- %d results", len(result.Items))
-	if result.HasMore {
-		fmt.Print(", more available")
-		if result.NextCursor != "" {
-			fmt.Printf(" (cursor: %s)", result.NextCursor)
-		}
-	}
-	fmt.Println(" ---")
+	fmt.Print(formatted)
 }
 
 func handleDiscover(ctx context.Context, cmdArgs []string) {
