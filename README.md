@@ -41,6 +41,14 @@ go install github.com/ministore/ministore/cmd/ministore@latest
 
 ### Using the CLI
 
+Every command that uses an index accepts `-i`/`--index`. It also falls back to
+`MINISTORE_INDEX` when the flag is omitted; an explicit flag takes precedence.
+
+```bash
+export MINISTORE_INDEX="$HOME/.local/share/example/docs.db"
+ministore search -w "hello"
+```
+
 ```bash
 # Create an index with a schema
 ministore index create -i docs.db --schema schema.json

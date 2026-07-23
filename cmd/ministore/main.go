@@ -16,6 +16,8 @@ import (
 	"github.com/ministore/ministore/ministore/storage/sqlite"
 )
 
+const indexEnvironmentVariable = "MINISTORE_INDEX"
+
 // sqliteDriverName is set by driver_purego.go or driver_cgo.go based on build tags
 var sqliteDriverName = "sqlite"
 
@@ -374,6 +376,13 @@ func (a *args) has(key string) bool {
 	return a.flags[key]
 }
 
+func (a *args) indexPath() string {
+	if value := a.get("i", "index"); value != "" {
+		return value
+	}
+	return os.Getenv(indexEnvironmentVariable)
+}
+
 // requirementCheck holds info about a required argument
 type requirementCheck struct {
 	name     string   // display name (e.g., "index")
@@ -403,6 +412,12 @@ func (a *args) checkRequired(cmd string, reqs ...requirementCheck) map[string]st
 
 	for _, req := range reqs {
 		v := a.get(req.keys...)
+		if v == "" && req.name == "index" {
+			v = a.indexPath()
+			if v != "" {
+				a.values["index"] = v
+			}
+		}
 		if v == "" && !req.optional {
 			missing = append(missing, "--"+req.name+" <"+strings.ToUpper(req.name)+">")
 		}
@@ -441,7 +456,7 @@ func (a *args) checkRequired(cmd string, reqs ...requirementCheck) map[string]st
 // Adapter creation
 func createAdapter(a *args) storage.Adapter {
 	backend := a.get("backend")
-	indexPath := a.get("i", "index")
+	indexPath := a.indexPath()
 	schemaName := a.get("schema-name")
 
 	switch backend {
