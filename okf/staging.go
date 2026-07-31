@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/text/cases"
 	"os"
 	"path/filepath"
 
@@ -13,6 +14,28 @@ import (
 
 const validationStageDDL = `
 CREATE TABLE entries (
+    path TEXT PRIMARY KEY COLLATE BINARY,
+    kind TEXT NOT NULL,
+    folded_path TEXT NOT NULL
+);
+CREATE TABLE concepts (
+    path TEXT PRIMARY KEY COLLATE BINARY,
+    raw BLOB NOT NULL
+);
+CREATE TABLE link_candidates (
+    id INTEGER PRIMARY KEY,
+    source TEXT NOT NULL COLLATE BINARY,
+    destination TEXT NOT NULL,
+    line INTEGER,
+    column INTEGER
+);
+CREATE TABLE edges (
+    source TEXT NOT NULL COLLATE BINARY,
+    target TEXT NOT NULL COLLATE BINARY,
+    PRIMARY KEY(source, target)
+);
+CREATE TABLE existing_paths (path TEXT PRIMARY KEY COLLATE BINARY);
+CREATE TABLE actions (
     path TEXT PRIMARY KEY COLLATE BINARY,
     kind TEXT NOT NULL
 );
@@ -93,8 +116,19 @@ func (s *validationStage) close() error {
 }
 
 func insertEntry(ctx context.Context, tx *sql.Tx, path, kind string) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO entries(path, kind) VALUES (?, ?)`, path, kind)
-	return err
+	folded := cases.Fold().String(path)
+	var existing string
+	err := tx.QueryRowContext(ctx, `SELECT path FROM entries WHERE folded_path=? AND path<>? LIMIT 1`, folded, path).Scan(&existing)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO entries(path, kind, folded_path) VALUES (?, ?, ?)`, path, kind, folded); err != nil {
+		return err
+	}
+	if existing != "" {
+		return insertFinding(ctx, tx, Finding{Severity: SeverityWarning, Code: CodeCaseFoldCollision, Path: path, SpecSection: "4.1", Message: "path collides under Unicode case folding with " + existing})
+	}
+	return nil
 }
 
 func insertFinding(ctx context.Context, tx *sql.Tx, finding Finding) error {

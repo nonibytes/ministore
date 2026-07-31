@@ -29,6 +29,22 @@ type normalizedFinding struct {
 	SpecSection string      `json:"spec_section,omitempty"`
 }
 
+func TestUnicodeCaseFoldCollision(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"Straße.md", "STRASSE.md"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("---\ntype: Note\n---\nx\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	found := false
+	if _, err := ValidateBundle(context.Background(), root, ValidateOptions{}, func(f Finding) error { found = found || f.Code == CodeCaseFoldCollision; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("missing Unicode case-fold collision")
+	}
+}
+
 func TestBaseValidationGolden(t *testing.T) {
 	root := filepath.Join("..", "testdata", "okf", "v0.2")
 	golden, err := os.ReadFile(filepath.Join(root, "expected", "base-validation.jsonl"))

@@ -379,6 +379,34 @@ ministore/
 └── load/                # Benchmark tests
 ```
 
+## Open Knowledge Format (OKF)
+
+Validate an OKF v0.2 bundle without opening an index, then synchronize it atomically:
+
+```bash
+ministore okf validate --bundle ./knowledge --format json
+ministore okf sync --bundle ./knowledge --index knowledge.db
+ministore okf sync --bundle ./knowledge --index knowledge.db --dry-run
+```
+
+`--strict` treats advisory warnings as a failed validation. Synchronization uses a
+private temporary SQLite stage and retains one concept projection at a time; set
+the operating system's standard temporary-directory environment variable when the
+default disk is too small. The stage contains source text and is owner-only on
+supported platforms, and is removed on success and handled failure. The indexed
+`raw_document` field preserves the exact source, including unknown YAML keys and
+line endings.
+
+An existing target must have the canonical OKF schema. A selected compatible OKF
+index is treated as dedicated to that bundle: paths absent from the bundle are
+deleted. Rebuild by deleting the dedicated index and running `okf sync` again.
+PostgreSQL synchronization uses one potentially long transaction; provision WAL
+and temporary disk for the bundle size and serialize concurrent sync jobs.
+
+After sync, use ordinary queries such as `trust_tier:human-reviewed`,
+`tags:finance`, or `backlinks:"/metrics/revenue"`. The complete contract and
+security model are in [docs/DESIGN.okf.md](docs/DESIGN.okf.md).
+
 ## Running Tests
 
 ```bash

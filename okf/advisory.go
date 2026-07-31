@@ -40,6 +40,8 @@ func validateConceptAdvisories(document Document) []Finding {
 		}
 	}
 	findings = append(findings, legacyCitationsFindings(document)...)
+	findings = append(findings, validateProvenanceAndTrust(document)...)
+	findings = append(findings, validateAttestedComputation(document)...)
 	return findings
 }
 

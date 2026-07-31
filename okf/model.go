@@ -5,8 +5,33 @@ type ValidateOptions struct {
 	TargetVersion string
 }
 
+type SyncOptions struct {
+	TargetVersion string
+	Strict        bool
+	DryRun        bool
+}
+
+type SyncReport struct {
+	OK                bool              `json:"ok"`
+	Bundle            string            `json:"bundle"`
+	ProjectionVersion int               `json:"projection_version"`
+	Concepts          int               `json:"concepts"`
+	Added             int               `json:"added"`
+	Updated           int               `json:"updated"`
+	Unchanged         int               `json:"unchanged"`
+	Deleted           int               `json:"deleted"`
+	DurationMS        int64             `json:"duration_ms"`
+	Validation        ValidationSummary `json:"validation"`
+}
+
 // FindingSink receives findings in deterministic order.
 type FindingSink func(Finding) error
+
+// Projection is the canonical flat MiniStore document for one OKF concept.
+type Projection map[string]any
+
+// ProjectionSink receives projections in source-path order.
+type ProjectionSink func(Projection) error
 
 // ValidationSummary contains disk-backed bundle validation counts.
 type ValidationSummary struct {

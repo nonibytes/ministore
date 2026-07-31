@@ -17,24 +17,7 @@ const defaultTargetVersion = "0.2"
 // concept base conformance one document at a time, and emits findings from a
 // private disk-backed stage in deterministic order.
 func ValidateBundle(ctx context.Context, root string, opts ValidateOptions, emit FindingSink) (summary ValidationSummary, err error) {
-	targetVersion := opts.TargetVersion
-	if targetVersion == "" {
-		targetVersion = defaultTargetVersion
-	}
-
-	info, err := os.Lstat(root)
-	if err != nil {
-		return ValidationSummary{}, fmt.Errorf("inspect OKF bundle root: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return ValidationSummary{}, fmt.Errorf("OKF bundle root is not a directory: %s", root)
-	}
-	absoluteRoot, err := filepath.Abs(root)
-	if err != nil {
-		return ValidationSummary{}, fmt.Errorf("resolve OKF bundle root: %w", err)
-	}
-
-	stage, err := newValidationStage("")
+	stage, summary, err := prepareBundle(ctx, root, opts)
 	if err != nil {
 		return ValidationSummary{}, err
 	}
@@ -43,35 +26,71 @@ func ValidateBundle(ctx context.Context, root string, opts ValidateOptions, emit
 			err = closeErr
 		}
 	}()
-
-	tx, err := stage.db.BeginTx(ctx, nil)
-	if err != nil {
-		return ValidationSummary{}, fmt.Errorf("begin OKF staging transaction: %w", err)
-	}
-	if err := enumerateBundle(ctx, tx, absoluteRoot); err != nil {
-		_ = tx.Rollback()
-		return ValidationSummary{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return ValidationSummary{}, fmt.Errorf("commit OKF entry staging: %w", err)
-	}
-
-	if err := validateStagedConcepts(ctx, stage, absoluteRoot); err != nil {
-		return ValidationSummary{}, err
-	}
-	declaredVersion, err := validateStagedReservedFiles(ctx, stage, absoluteRoot)
-	if err != nil {
-		return ValidationSummary{}, err
-	}
-	summary, err = stage.summary(ctx, absoluteRoot, targetVersion)
-	if err != nil {
-		return ValidationSummary{}, fmt.Errorf("summarize OKF validation: %w", err)
-	}
-	summary.DeclaredVersion = declaredVersion
 	if err := stage.emitFindings(ctx, emit); err != nil {
 		return ValidationSummary{}, fmt.Errorf("emit OKF validation finding: %w", err)
 	}
 	return summary, nil
+}
+
+func prepareBundle(ctx context.Context, root string, opts ValidateOptions) (stage *validationStage, summary ValidationSummary, err error) {
+	targetVersion := opts.TargetVersion
+	if targetVersion == "" {
+		targetVersion = defaultTargetVersion
+	}
+
+	info, err := os.Lstat(root)
+	if err != nil {
+		return nil, ValidationSummary{}, fmt.Errorf("inspect OKF bundle root: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, ValidationSummary{}, fmt.Errorf("OKF bundle root is not a directory: %s", root)
+	}
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, ValidationSummary{}, fmt.Errorf("resolve OKF bundle root: %w", err)
+	}
+
+	stage, err = newValidationStage("")
+	if err != nil {
+		return nil, ValidationSummary{}, err
+	}
+	cleanupStage := stage
+	failed := true
+	defer func() {
+		if failed {
+			_ = cleanupStage.close()
+		}
+	}()
+
+	tx, err := stage.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, ValidationSummary{}, fmt.Errorf("begin OKF staging transaction: %w", err)
+	}
+	if err := enumerateBundle(ctx, tx, absoluteRoot); err != nil {
+		_ = tx.Rollback()
+		return nil, ValidationSummary{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, ValidationSummary{}, fmt.Errorf("commit OKF entry staging: %w", err)
+	}
+
+	if err := validateStagedConcepts(ctx, stage, absoluteRoot); err != nil {
+		return nil, ValidationSummary{}, err
+	}
+	if err := resolveStagedLinks(ctx, stage); err != nil {
+		return nil, ValidationSummary{}, err
+	}
+	declaredVersion, err := validateStagedReservedFiles(ctx, stage, absoluteRoot)
+	if err != nil {
+		return nil, ValidationSummary{}, err
+	}
+	summary, err = stage.summary(ctx, absoluteRoot, targetVersion)
+	if err != nil {
+		return nil, ValidationSummary{}, fmt.Errorf("summarize OKF validation: %w", err)
+	}
+	summary.DeclaredVersion = declaredVersion
+	failed = false
+	return stage, summary, nil
 }
 
 func enumerateBundle(ctx context.Context, tx *sql.Tx, root string) error {
@@ -174,10 +193,25 @@ func validateStagedConcepts(ctx context.Context, stage *validationStage, root st
 		}
 		findings = append(findings, validateConceptBase(document)...)
 		findings = append(findings, validateConceptAdvisories(document)...)
+		resourceFindings, err := validateAttestedResources(ctx, stage, document)
+		if err != nil {
+			return fmt.Errorf("validate OKF computation resources for %q: %w", relative, err)
+		}
+		findings = append(findings, resourceFindings...)
 
 		tx, err := stage.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("begin OKF finding transaction: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO concepts(path, raw) VALUES (?, ?)`, relative, raw); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("stage OKF concept %q: %w", relative, err)
+		}
+		for _, candidate := range extractLinkCandidates(document) {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO link_candidates(source,destination,line,column) VALUES (?,?,?,?)`, relative, candidate.destination, candidate.line, candidate.column); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("stage OKF link from %q: %w", relative, err)
+			}
 		}
 		for _, finding := range findings {
 			if err := insertFinding(ctx, tx, finding); err != nil {
