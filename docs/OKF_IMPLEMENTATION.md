@@ -3,15 +3,15 @@
 ## Repositories
 
 - Go: `codex/okf-implementation`; latest feature commit
-  `83716fb1c1596c51b44f7d8b705f61218d96904a`
+  `18c9eec3ee7c5ad6ab5eab168c039f7966879d72`
 - Rust: `codex/okf-implementation`; latest feature commit
-  `48965bd43cc901e1abeabde77e00729d765cc9ad`
+  `67ea72d99b6e3316f8f2356180a190c0d28abef2`
 
 ## Work queue
 
 ### Phase 1 — Shared contract and fixtures
 
-- [ ] Add the pinned fixture corpus and matching manifests.
+- [x] Add the pinned fixture corpus and matching manifests.
 - [ ] Freeze finding codes and normalized validation, projection, and sync outputs.
 - [ ] Implement lossless delimiter parsing and YAML accessors in both languages.
 - [ ] Add parser properties, fuzz targets, and raw-byte tests.
@@ -65,6 +65,12 @@
 - `MINISTORE_POSTGRES_TEST_DSN=... go test ./ministore -run
   '^TestScanPathsPostgres$' -count=1` against `postgres:17-alpine` — passed.
 - `git diff --check` in both repositories — passed before commit.
+- `sha256sum -c testdata/okf/v0.2/MANIFEST.sha256` in both repositories —
+  passed for all 109 fixture files.
+- `diff -qr` between the Go and Rust fixture trees — no differences.
+- `diff -qr` between each committed upstream sample and commit
+  `3fcbb9f828c2f23d109c855ee403c3a4c81f3a96` — no differences; pinned
+  `SPEC.md` SHA-256 also matched the design.
 
 ## Blockers
 
@@ -76,3 +82,6 @@
   PostgreSQL ordering requires `COLLATE "C"`.
 - Rust scans must hold the connection mutex while yielding SQLite rows, so callbacks
   must not recursively call the same `Index`.
+- The offline corpus contains synthetic contract fixtures plus exact GA4, Stack
+  Overflow, Bitcoin, and Acme Retail snapshots; expected normalized artifacts are
+  intentionally generated only after the parser and validation contracts exist.
