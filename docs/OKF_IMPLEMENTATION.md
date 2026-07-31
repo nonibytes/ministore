@@ -2,136 +2,75 @@
 
 ## Repositories
 
-- Go: `codex/okf-implementation`; latest feature commit
-  `051e69c1a129c3b454f4667ac36a6357213814b7`
-- Rust: `codex/okf-implementation`; latest feature commit
-  `30ea1a79c7f3748435c043878b3dd87c27f988fc`
+- Go branch: `codex/okf-implementation`; feature commit `5700be2`
+- Rust branch: `codex/okf-implementation`; feature commit `251c942`
 
-## Work queue
+## Phase checklist
 
 ### Phase 1 — Shared contract and fixtures
 
-- [x] Add the pinned fixture corpus and matching manifests.
-- [x] Freeze the finding-code catalog in both public APIs.
-- [ ] Add normalized validation, projection, graph, hash, and sync golden outputs.
-  (in progress: shared base, reserved, version, lifecycle, tags, and legacy
-  validation JSONL complete)
-- [x] Implement lossless delimiter parsing and YAML accessors in both languages.
-- [x] Add parser property/fuzz coverage and raw-byte tests.
+- [x] Pinned v0.2 corpus and identical manifests in both repositories.
+- [x] Stable finding catalog and deterministic normalized validation goldens.
+- [x] Shared canonical projection and hash golden.
+- [x] Cross-language fixture, validation, graph, projection, hash, schema, and sync comparison in `scripts/verify-okf.sh`.
 
 ### Phase 2 — MiniStore streaming primitives
 
-- [x] Implement and test ordered streaming path scans in Go SQLite, Go PostgreSQL,
-  and Rust SQLite.
-- [x] Implement transaction-scoped streamed writers in Go and Rust.
-- [x] Delegate existing in-memory batches to the streamed writers.
-- [x] Test rollback, cancellation, mixed operations, document frequencies, ordering,
-  and Rust connection locking.
+- [x] Ordered bytewise path scans for Go SQLite/PostgreSQL and Rust SQLite.
+- [x] Transaction-scoped streamed writers with in-memory batch delegation.
+- [x] Rollback, cancellation, mixed-operation, document-frequency, ordering, connection-locking, and large-stream tests.
 
 ### Phase 3 — Parsing and validation
 
-- [ ] Add the Go `okf` package and Rust `ministore-okf` crate. (in progress:
-  lossless parser, YAML-node access, base/reserved validator, and the first
-  advisory validators complete)
-- [ ] Implement the complete finding catalog and deterministic disk-backed reports.
-  (in progress: catalog frozen; private SQLite entry/finding stage and ordered
-  finding stream complete)
-- [ ] Validate reserved files, versions, optional families, legacy metadata, actors,
-  lifecycle, provenance, trust, and attested computations. (base concept,
-  AST-aware reserved files, versions, lifecycle, tags, and v0.1 fallbacks
-  complete; provenance, trust/actors, and attestation pending)
-- [ ] Add equivalent `okf validate` library and CLI behavior.
+- [x] Lossless one-document parsers and typed YAML-node accessors in Go and Rust.
+- [x] Disk-backed deterministic findings and complete stable finding-code use.
+- [x] Reserved files, versions, lifecycle, tags, legacy compatibility, provenance, actors, trust, footnotes, and attested-computation validation.
+- [x] Unicode case-fold collision parity test.
+- [x] Equivalent streaming `okf validate` libraries and CLIs with pretty/JSON and strict behavior.
 
 ### Phase 4 — Graph and projection
 
-- [ ] Implement CommonMark link extraction and safe local target resolution.
-- [ ] Implement disk-backed edges, forward links, and backlinks.
-- [ ] Implement the canonical schema, projection, and hash.
-- [ ] Make Go and Rust projection fixtures byte-identical.
+- [x] CommonMark link extraction excluding images and code.
+- [x] Safe URI-reference resolution, one-time segment decoding, root-escape checks, and broken-link findings.
+- [x] Disk-backed deduplicated edges with per-concept forward links and backlinks.
+- [x] Fixed schema, one-document projection, raw-source retention, canonical JSON, and SHA-256 hash.
+- [x] Byte-identical Go/Rust projections and hashes, including integer, large, and small-exponent usage counts.
 
 ### Phase 5 — Synchronization
 
-- [ ] Implement secure temporary SQLite staging and cleanup. (validation entry and
-  finding tables, owner-only lifecycle, and cleanup complete; graph/action tables
-  pending)
-- [ ] Implement disk-backed target comparison and action classification.
-- [ ] Implement atomic streamed apply, dry run, strict mode, schema verification,
-  missing-index creation, reports, and unchanged timestamp preservation.
-- [ ] Add equivalent `okf sync` CLI behavior and backend tests.
+- [x] Owner-only temporary SQLite stages with normal/handled-error cleanup.
+- [x] Disk-backed existing paths and add/update/unchanged/delete actions.
+- [x] Schema verification, strict and dry-run blocking, missing-index creation, unchanged timestamp preservation, and reports.
+- [x] One streamed atomic target transaction with no nested public writes.
+- [x] Go SQLite/PostgreSQL and Rust SQLite support; PostgreSQL sync integration test.
+- [x] Equivalent `okf sync` CLIs and safe missing/wrong-index handling.
 
 ### Phase 6 — Parity, performance, and release quality
 
-- [ ] Add the top-level `scripts/verify-okf.sh` gate and PostgreSQL container test.
-- [ ] Prove cross-language fixture and CLI parity.
-- [ ] Prove aggregate bundle size does not drive application RAM.
-- [ ] Cover disk-full, malformed/adversarial input, rollback, and exact retrieval.
-- [ ] Complete user and operational documentation.
-- [ ] Run authenticated read-only `claude-yolo` review and resolve findings.
+- [x] Offline end-to-end verification driver with fixture manifests and live CLI/database parity.
+- [x] Aggregate-bundle memory regression check and large streamed transaction coverage.
+- [x] Malformed/adversarial parser properties, exact raw retrieval, validation/dry-run no-write, rollback, and schema mismatch coverage.
+- [x] User and operational documentation for temporary storage, sensitive source, queries, rebuilds, and PostgreSQL WAL/serialization.
+- [x] Authenticated read-only `claude-yolo` review run with `ANTHROPIC_API_KEY` unset; actionable PostgreSQL target detection and numeric canonicalization findings fixed and regression-tested.
 
 ## Verification record
 
-- `go test ./...` — passed.
-- `cargo test --workspace` — passed (54 core unit tests, 22 core integration
-  tests, and 21 OKF parser/validation tests).
-- `git diff --check` in both repositories — passed before commit.
-- `sha256sum -c testdata/okf/v0.2/MANIFEST.sha256` in both repositories —
-  passed for all 111 fixture and golden files.
-- `diff -qr` between the Go and Rust fixture trees — no differences.
-- `diff -qr` between each committed upstream sample and commit
-  `3fcbb9f828c2f23d109c855ee403c3a4c81f3a96` — no differences; pinned
-  `SPEC.md` SHA-256 also matched the design.
-- `go test -mod=readonly ./okf` and `go vet ./okf` — passed.
-- `go test ./okf -run '^$' -fuzz '^FuzzParseDocument$' -fuzztime=5s` —
-  passed after 213,163 executions.
-- `CGO_ENABLED=0 go test -mod=readonly ./...` — passed.
-- `go test -race ./ministore/...` and `go vet ./...` — passed.
-- `MINISTORE_POSTGRES_TEST_DSN=... go test ./ministore -run
-  'Test(WriteBatch|ScanPaths)Postgres' -count=1` against `postgres:17-alpine` —
-  passed, including rollback and keyword document-frequency checks.
-- `rustfmt --check` on the new `ministore-okf` crate — passed.
-- `cargo clippy -p ministore-okf --all-targets -- -D warnings` — passed.
-- `cargo test -p ministore-okf` — passed, including generated arbitrary-input
-  property cases; `cargo test --workspace` also passed.
-- The shared `expected/base-validation.jsonl` golden passed byte-for-byte in Go
-  and Rust; the complete fixture trees and manifests remain identical.
+- `scripts/verify-okf.sh` — passed after final fixes. It ran fixture manifest checks; Go vet, pure-Go tests, race tests, CGO/FTS5 tests; strict Rust workspace Clippy and all-feature tests; live normalized validation/sync parity; byte-identical database projections/hashes; dry-run missing-target safety; memory scaling; and isolated PostgreSQL core/sync tests.
+- `go test ./okf` — passed, including sync consistency, projection golden, Unicode case folding, numeric exponent hashing, and malformed-input coverage.
+- `cargo test -p ministore-okf` — passed, including the corresponding parity and sync tests.
+- `git diff --check` — passed in both repositories before feature commits.
+- `env -u ANTHROPIC_API_KEY claude-yolo ...` — completed read-only review. Findings requiring changes were addressed; long transactions and unsupported concurrent sync remain explicitly documented design semantics, and killed-process orphan cleanup remains delegated to operating-system temporary-directory policy.
+- The requested `cargo fmt --all -- --check` is not a usable repository-wide gate on the inherited Rust baseline: it reports 4,786 lines of pre-existing formatting differences across unrelated core and CLI files. The verifier instead runs `rustfmt --check` on every changed OKF Rust file. Strict workspace Clippy and all workspace tests pass. Formatting the entire legacy repository would be an unrelated 47-file rewrite, so it was not included.
 
 ## Blockers
 
 - None.
 
-## Learnings
+## Implementation learnings
 
-- The Go storage adapters centralize administrative SQL in `storage.SQL`; bytewise
-  PostgreSQL ordering requires `COLLATE "C"`.
-- Rust scans must hold the connection mutex while yielding SQLite rows, so callbacks
-  must not recursively call the same `Index`.
-- The offline corpus contains synthetic contract fixtures plus exact GA4, Stack
-  Overflow, Bitcoin, and Acme Retail snapshots; expected normalized artifacts are
-  intentionally generated only after the parser and validation contracts exist.
-- The design's delimiter prose mentions stale example code `OKF010`, and its sample
-  JSON uses stale `OKF241`; both implementations follow the authoritative catalog:
-  BOM is `OKF107` and missing local targets are `OKF400`.
-- Rust uses the low-level `yaml-rust2` event API because its convenience loader
-  rejects duplicate keys. Alias nodes remain finite and resolve lazily, so cyclic
-  extensions are preserved without whole-tree expansion.
-- Go streamed puts release keyword-ID and document-frequency state after each
-  document. This keeps memory proportional to one input document without an input
-  limit; optional byte-bounded coalescing remains a measured optimization, not a
-  correctness requirement. Deletes flush pending deltas before decrementing.
-- PostgreSQL treats a missing FTS table as an error that aborts the transaction even
-  if the adapter later ignores the error. Schema-aware deletes therefore skip FTS
-  SQL entirely when an index has no text fields.
-- Bundle enumeration writes paths directly to SQLite from streaming directory
-  iterators. SQLite supplies global bytewise ordering, avoiding a complete in-memory
-  path list even for a flat directory containing the whole bundle.
-- Parser-specific YAML syntax locations are omitted only from normalized parity
-  goldens; stable finding code, severity, path, and specification section remain
-  identical, while each public finding retains any location its parser provides.
-- Reserved Markdown is parsed one file at a time with CommonMark AST/event APIs.
-  The validators ignore markup inside fenced code, accept inline and reference
-  links, report source-line starts consistently across languages, and stage all
-  findings in SQLite before deterministic emission.
-- Root version declarations accept YAML scalar spelling such as quoted or bare
-  `0.2`, but require `<major>.<minor>` digits and warn when the declared version is
-  invalid or unsupported. Rust YAML event positions use the physical frontmatter
-  line offset so advisory locations match Go and the shared golden exactly.
+- SQLite staging owns complete path, source, finding, graph, and action state; application memory holds one source/projection and its adjacency lists.
+- Link candidates and actions use keyset iteration so no complete graph or operation collection is materialized in RAM.
+- CLI JSON validation findings spool to an owner-private temporary file instead of accumulating a finding array.
+- PostgreSQL schema emptiness is checked without creating it, so connectivity or invalid-index errors cannot be mistaken for a missing target.
+- Numeric projection values require explicit cross-language exponent normalization; golden and edge-case tests lock the hash contract.
+- Go `cases.Fold` and Rust `unicode-casefold` agree on the pinned non-ASCII collision regression; both stage collision checks with identical query behavior.
