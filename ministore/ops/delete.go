@@ -8,8 +8,18 @@ import (
 	"github.com/ministore/ministore/ministore/storage"
 )
 
-// DeleteByItemID deletes an item and all its index entries by item ID
+// DeleteByItemID deletes an item and all its index entries by item ID.
 func DeleteByItemID(ctx context.Context, exec storage.SQLExecutor, sqlt storage.SQL, fts storage.FTS, itemID int64) error {
+	return deleteByItemID(ctx, exec, sqlt, fts, true, itemID)
+}
+
+// DeleteByItemIDWithSchema avoids touching an absent FTS table when the schema
+// contains no text fields.
+func DeleteByItemIDWithSchema(ctx context.Context, exec storage.SQLExecutor, sqlt storage.SQL, fts storage.FTS, schema storage.Schema, itemID int64) error {
+	return deleteByItemID(ctx, exec, sqlt, fts, fts.HasFTS(schema), itemID)
+}
+
+func deleteByItemID(ctx context.Context, exec storage.SQLExecutor, sqlt storage.SQL, fts storage.FTS, deleteFTS bool, itemID int64) error {
 	// 1. Load value_ids from postings for doc_freq maintenance
 	valueIDs, err := loadOldValueIDs(ctx, exec, sqlt, itemID)
 	if err != nil {
@@ -42,8 +52,10 @@ func DeleteByItemID(ctx context.Context, exec storage.SQLExecutor, sqlt storage.
 	}
 
 	// 4. Delete FTS row
-	if err := fts.DeleteRow(ctx, exec, itemID); err != nil {
-		return fmt.Errorf("delete FTS: %w", err)
+	if deleteFTS {
+		if err := fts.DeleteRow(ctx, exec, itemID); err != nil {
+			return fmt.Errorf("delete FTS: %w", err)
+		}
 	}
 
 	// 5. Delete items row
@@ -54,8 +66,18 @@ func DeleteByItemID(ctx context.Context, exec storage.SQLExecutor, sqlt storage.
 	return nil
 }
 
-// DeleteByPath deletes an item by path, returns true if item was found and deleted
+// DeleteByPath deletes an item by path, returns true if item was found and deleted.
 func DeleteByPath(ctx context.Context, db *sql.DB, sqlt storage.SQL, fts storage.FTS, path string) (bool, error) {
+	return deleteByPath(ctx, db, sqlt, fts, true, path)
+}
+
+// DeleteByPathWithSchema avoids touching an absent FTS table when the schema
+// contains no text fields.
+func DeleteByPathWithSchema(ctx context.Context, db *sql.DB, sqlt storage.SQL, fts storage.FTS, schema storage.Schema, path string) (bool, error) {
+	return deleteByPath(ctx, db, sqlt, fts, fts.HasFTS(schema), path)
+}
+
+func deleteByPath(ctx context.Context, db *sql.DB, sqlt storage.SQL, fts storage.FTS, deleteFTS bool, path string) (bool, error) {
 	// Find item_id
 	var itemID int64
 	var createdAt int64
@@ -74,7 +96,7 @@ func DeleteByPath(ctx context.Context, db *sql.DB, sqlt storage.SQL, fts storage
 	}
 	defer tx.Rollback()
 
-	if err := DeleteByItemID(ctx, tx, sqlt, fts, itemID); err != nil {
+	if err := deleteByItemID(ctx, tx, sqlt, fts, deleteFTS, itemID); err != nil {
 		return false, err
 	}
 
@@ -85,9 +107,18 @@ func DeleteByPath(ctx context.Context, db *sql.DB, sqlt storage.SQL, fts storage
 	return true, nil
 }
 
-// DeleteWhere deletes all items matching a compiled query
-// Returns the number of items deleted
+// DeleteWhere deletes all items matching a compiled query.
 func DeleteWhere(ctx context.Context, db *sql.DB, sqlt storage.SQL, fts storage.FTS, resultCTE string, cteParts []string, args []any) (int, error) {
+	return deleteWhere(ctx, db, sqlt, fts, true, resultCTE, cteParts, args)
+}
+
+// DeleteWhereWithSchema avoids touching an absent FTS table when the schema
+// contains no text fields.
+func DeleteWhereWithSchema(ctx context.Context, db *sql.DB, sqlt storage.SQL, fts storage.FTS, schema storage.Schema, resultCTE string, cteParts []string, args []any) (int, error) {
+	return deleteWhere(ctx, db, sqlt, fts, fts.HasFTS(schema), resultCTE, cteParts, args)
+}
+
+func deleteWhere(ctx context.Context, db *sql.DB, sqlt storage.SQL, fts storage.FTS, deleteFTS bool, resultCTE string, cteParts []string, args []any) (int, error) {
 	// Build the query to get item_ids
 	var withClause string
 	if len(cteParts) > 0 {
@@ -126,7 +157,7 @@ func DeleteWhere(ctx context.Context, db *sql.DB, sqlt storage.SQL, fts storage.
 	defer tx.Rollback()
 
 	for _, itemID := range itemIDs {
-		if err := DeleteByItemID(ctx, tx, sqlt, fts, itemID); err != nil {
+		if err := deleteByItemID(ctx, tx, sqlt, fts, deleteFTS, itemID); err != nil {
 			return 0, fmt.Errorf("delete item %d: %w", itemID, err)
 		}
 	}
