@@ -23,16 +23,17 @@ The key design decisions are:
 
 1. **The bundle is canonical; the index is disposable.** Editing the index never
    edits the bundle. Rebuilding the index from the bundle must always be safe.
-2. **One OKF bundle maps to one MiniStore index.** This avoids ambiguous paths,
-   destructive cross-bundle synchronization, and a premature multi-tenant model.
+2. **One OKF bundle maps to one MiniStore index.** The synchronizer treats every
+   item in the selected index as belonging to the selected bundle. This avoids a
+   premature multi-tenant model; choosing the correct index is the caller's
+   responsibility.
 3. **Parsing and validation are independent of MiniStore.** They are public
    library capabilities and can run without creating or opening an index.
 4. **The importer derives flat fields from nested OKF metadata.** It never expects
    `generated`, `verified`, `sources`, or attestation metadata to fit directly into
    MiniStore's flat schema.
 5. **Original concept documents are preserved verbatim.** The indexed JSON stores
-   the exact UTF-8 document and exact YAML frontmatter text. No exporter needs to
-   reconstruct YAML from JSON.
+   the exact UTF-8 document. No exporter needs to reconstruct YAML from JSON.
 6. **Only concept documents become MiniStore items.** Reserved files and ancillary
    assets remain in the canonical bundle. MiniStore is a search index, not a
    general-purpose bundle archive.
@@ -118,9 +119,8 @@ The feature is successful when a user can:
 An **OKF concept document** is any `.md` file except the reserved names `index.md`
 and `log.md`. Its **concept ID** is its bundle-relative path without `.md`. An
 **OKF projection** is the flat JSON document derived from one concept and stored as
-one MiniStore item. The **source hash** covers the original file bytes. The
-**projection hash** covers every field whose change must update the index, including
-graph-derived fields.
+one MiniStore item. The **projection hash** covers every stored field whose change
+must update the index, including raw source and graph-derived fields.
 
 ## Architectural boundary
 
@@ -326,9 +326,9 @@ without normalizing either in the retained source.
 The delimiter algorithm is deliberately small:
 
 1. Optionally recognize a UTF-8 BOM. Preserve it and emit `OKF010` as a warning.
-2. Read the first physical line. After removing only its line ending, it must be
-   exactly `---`. Leading or trailing spaces are accepted for compatibility only
-   when `LenientDelimiters` is enabled; they produce `OKF011`.
+2. Read the first physical line. After removing its line ending and surrounding
+   whitespace, it must be `---`. Surrounding whitespace is accepted with a warning
+   for compatibility with existing bundles.
 3. Scan subsequent physical lines until a line whose content, excluding its line
    ending, is exactly `---`.
 4. The bytes between delimiters are `frontmatter_yaml`. The bytes after the closing
@@ -359,31 +359,30 @@ Recognized scalar extraction follows these rules:
   sequence as required by OKF v0.2 section 5.2.
 - `sources` must be a sequence for advisory validity. A mapping is tolerated as a
   one-element sequence with a warning for defensive consumption.
-- YAML aliases may be resolved for known fields, subject to the resource limits
-  below. Raw source remains authoritative.
+- YAML aliases may be resolved for known fields. Raw source remains authoritative.
 - Unknown YAML values are never flattened into MiniStore fields.
 
-The indexed document stores both `raw_document` and `frontmatter_yaml` as
-undeclared JSON fields. MiniStore already retains undeclared fields in `data_json`
-while skipping them during typed indexing. This preserves arbitrary extensions
-without letting their types break the index schema.
+The indexed document stores `raw_document` as an undeclared JSON field. MiniStore
+already retains undeclared fields in `data_json` while skipping them during typed
+indexing. Because the raw document includes the exact frontmatter, storing a second
+`frontmatter_yaml` copy would add space and synchronization state without
+preserving anything new.
 
-### Resource limits
+### General-purpose input behavior
 
-Parsing untrusted YAML and Markdown must be bounded. Defaults are:
+MiniStore imposes no fixed application-level limit on document size, bundle size,
+file count, YAML depth or node count, or links per document. It processes valid
+input until completion, context cancellation, or an operating-system or dependency
+error. The OKF layer uses parser libraries through their ordinary public APIs and
+adds no arbitrary workload cap. A parser panic, unbounded expansion bug, or memory
+safety failure is a dependency defect, not a class of input MiniStore silently
+truncates or rejects by policy.
 
-| Limit | Default | Behavior when exceeded |
-|---|---:|---|
-| Concept or reserved Markdown file | 8 MiB | error for that file |
-| Total regular files encountered | 100,000 | operational error |
-| Total bytes read in one bundle | 1 GiB | operational error |
-| YAML nesting depth | 64 | parse error |
-| YAML nodes per document | 100,000 | parse error |
-| Markdown links per document | 100,000 | warning and truncate graph extraction |
-
-Library callers can lower or raise these limits through `LoadOptions`. The CLI
-offers `--max-file-size` and `--max-bundle-size`; the structural limits remain
-library options to avoid an oversized CLI surface.
+Symlink exclusion, bundle-root containment, and the prohibition on external
+fetching remain in force. They define which data the command is authorized to read;
+they are not workload-size policies. Deployments that require quotas should apply
+them outside this general-purpose library and CLI, for example through process or
+container resource controls.
 
 ## Conformance and advisory validation
 
@@ -424,7 +423,7 @@ reserved-file structures it incorporates:
 
 | Code family | Condition |
 |---|---|
-| `OKF1xx` | concept input/frontmatter is oversized, invalid UTF-8, missing, unterminated, invalid YAML, not a mapping, or has a missing/non-string/empty `type` |
+| `OKF1xx` | concept input/frontmatter is invalid UTF-8, missing, unterminated, invalid YAML, not a mapping, or has a missing/non-string/empty `type` |
 | `OKF2xx` | a non-root `index.md` has frontmatter, an index entry violates the section/list/link structure, or a `log.md` date heading is not `YYYY-MM-DD` |
 
 Unknown types, unknown keys, absent optional families, broken links, and missing
@@ -472,7 +471,6 @@ because their input is unavailable.
 | `OKF106` | warning | recognized top-level key occurs more than once |
 | `OKF107` | warning | document begins with a UTF-8 BOM |
 | `OKF108` | warning | frontmatter delimiter contains tolerated whitespace |
-| `OKF109` | error | individual Markdown file exceeds the configured size limit |
 | `OKF200` | error | non-root `index.md` contains frontmatter |
 | `OKF201` | error | `index.md` does not contain the required section structure |
 | `OKF202` | error | `index.md` list entry is not link-first |
@@ -506,12 +504,8 @@ because their input is unavailable.
 | `OKF400` | warning | local Markdown target does not exist as a concept |
 | `OKF401` | warning | local path escapes the bundle root |
 | `OKF402` | warning | local destination contains malformed or unsafe percent encoding |
-| `OKF403` | warning | per-document link limit was reached and extraction was truncated |
 
-Resource-limit exhaustion that prevents a complete report is an operational error,
-not a finding. File-specific size overflow is `OKF109`; the validator may continue
-only when it can still prove that total resource bounds are respected. Any future
-code must be additive; existing codes never change meaning.
+Any future code must be additive; existing codes never change meaning.
 
 ### Version behavior
 
@@ -553,13 +547,12 @@ For every Markdown link destination:
    warning.
 8. If the normalized path names an existing non-reserved `.md` document, convert
    it to a concept ID and record an edge.
-9. If it names a missing `.md` path, record it in `broken_link_targets` and warn.
+9. If it names a missing `.md` path, warn.
 10. If it names a reserved or ancillary file, treat it as a non-concept local
     reference. It may satisfy path existence validation but creates no graph edge.
 
 Destinations retain their original spelling in diagnostics. Indexed
-`link_targets`, `backlinks`, and `broken_link_targets` use normalized MiniStore
-concept paths.
+`link_targets` and `backlinks` use normalized MiniStore concept paths.
 
 ```mermaid
 flowchart TD
@@ -604,10 +597,10 @@ one or more events, none with by: human:*        -> machine-confirmed
 one or more events, any with by: human:*         -> human-reviewed
 ```
 
-The order of events does not affect the tier. `verified_at` contains every valid
-verification timestamp as a multi-date field. `latest_verified_at` contains the
-maximum valid timestamp. Malformed events remain in `raw_document` but do not
-contribute to derived fields.
+The order of events does not affect the tier. `latest_verified_at` contains the
+maximum valid verification timestamp. All events remain available in
+`raw_document`; duplicating every timestamp into a second indexed field is not
+needed for the supported queries.
 
 The implementation does not lower trust when `generated.at` is later than the
 latest verification. That behavior is under upstream discussion and is not part of
@@ -678,7 +671,6 @@ schema. Both implementations serialize it identically for conformance tests.
 | `generated_by` | keyword | no | `generated.by` |
 | `generated_at` | date | no | `generated.at`, or legacy `timestamp` fallback |
 | `verified_by` | keyword | yes | every valid `verified[].by` |
-| `verified_at` | date | yes | every valid `verified[].at` |
 | `latest_verified_at` | date | no | maximum valid verification time |
 | `trust_tier` | keyword | no | derived trust tier |
 | `stale_after` | date | no | `stale_after` |
@@ -690,10 +682,8 @@ schema. Both implementations serialize it identically for conformance tests.
 | `runtime` | keyword | no | Attested Computation `runtime` |
 | `link_targets` | keyword | yes | resolved forward concept paths |
 | `backlinks` | keyword | yes | inverse resolved concept paths |
-| `broken_link_targets` | keyword | yes | normalized unresolved local `.md` paths |
 | `okf_version` | keyword | no | effective target version |
 | `okf_source_path` | keyword | no | bundle-relative `.md` path |
-| `okf_source_hash` | keyword | no | SHA-256 of exact source bytes |
 | `okf_projection_hash` | keyword | no | SHA-256 of canonical projection input |
 | `okf_projection_version` | number | no | projection contract version, initially `1` |
 
@@ -703,7 +693,6 @@ The stored JSON also contains undeclared fields:
 |---|---|
 | `path` | MiniStore path, required by the core API |
 | `raw_document` | exact UTF-8 concept document, including BOM and line endings |
-| `frontmatter_yaml` | exact bytes between delimiters represented as UTF-8 text |
 
 These fields are returned by `get` and `search --show all` but are not separately
 indexed. The raw document is the authoritative representation of unknown extension
@@ -715,23 +704,21 @@ and source path) are always present.
 
 ### Projection hash
 
-`okf_source_hash` is lowercase hexadecimal SHA-256 over the exact file bytes.
-`okf_projection_hash` is SHA-256 over canonical JSON containing:
+`okf_projection_hash` is lowercase hexadecimal SHA-256 over canonical JSON
+containing:
 
 - the projection contract version;
 - every declared indexed field except `okf_projection_hash` itself;
 - `path`;
-- `raw_document`; and
-- `frontmatter_yaml`.
+- `raw_document`.
 
-Object keys are lexicographically sorted, arrays are already sorted where order has
-no OKF meaning, and JSON is encoded without insignificant whitespace. Verification
-event timestamps retain source order in `verified_at`; graph and source aggregate
-arrays are sorted and deduplicated. Both languages use the same golden fixtures to
-lock canonicalization behavior.
+Object keys are lexicographically sorted, arrays are sorted where order has no OKF
+meaning, and JSON is encoded without insignificant whitespace. Graph and source
+aggregate arrays are sorted and deduplicated. Both languages use the same golden
+fixtures to lock canonicalization behavior.
 
 Including graph fields in the hash means adding or removing another document can
-correctly update backlinks even when the current file's source hash is unchanged.
+correctly update backlinks even when the current file's source bytes are unchanged.
 
 ## Synchronization
 
@@ -740,13 +727,15 @@ correctly update backlinks even when the current file's source hash is unchanged
 `okf sync` requires:
 
 - an existing bundle directory;
-- an existing MiniStore index whose schema exactly equals the canonical OKF schema;
-  and
-- exclusive logical ownership of that index by this bundle.
+- an index dedicated to the selected bundle.
 
-The command refuses a generic or differently versioned index. It does not overlay
-OKF documents onto unrelated items. `okf init` creates the canonical schema and
-performs the first sync.
+If the index does not exist, `sync` creates it with the canonical OKF schema after
+the bundle validates. If it exists, its schema must exactly equal that schema. The
+command refuses a generic or differently versioned index and never overlays OKF
+documents onto unrelated items intentionally. MiniStore has no index metadata for a
+bundle identity, so it cannot distinguish two bundles that use the same OKF schema.
+Selecting the wrong existing OKF index replaces its contents; the CLI documents
+this behavior instead of adding a hidden sentinel item or a new metadata subsystem.
 
 ### Algorithm
 
@@ -758,7 +747,7 @@ sequenceDiagram
     participant DB as MiniStore index
 
     CLI->>OKF: Sync(bundle, index, options)
-    OKF->>FS: Enumerate and read deterministic snapshot
+    OKF->>FS: Enumerate and read bundle
     OKF->>OKF: Parse all Markdown and YAML
     OKF->>OKF: Validate reserved files and concepts
     alt errors or strict warnings
@@ -766,45 +755,42 @@ sequenceDiagram
     else acceptable bundle
         OKF->>OKF: Resolve links and build backlinks
         OKF->>OKF: Build documents and projection hashes
-        OKF->>DB: ListPaths("")
-        loop each staged concept also present in index
-            OKF->>DB: Get(path)
-            DB-->>OKF: existing projection hash
+        alt index exists
+            OKF->>DB: Verify schema and ListPaths("")
+            loop each staged concept also present in index
+                OKF->>DB: Get(path)
+                DB-->>OKF: existing projection hash
+            end
+        else index is missing
+            OKF->>OKF: Classify every concept as added
         end
-        OKF->>OKF: Compute puts and tombstone deletes
-        OKF->>FS: Recheck path/size/mtime snapshot
-        alt filesystem changed during staging
-            OKF-->>CLI: Operational error; no database writes
-        else stable snapshot
-            OKF->>DB: Execute one mixed put/delete batch
-            DB-->>OKF: Commit or rollback atomically
-            OKF-->>CLI: Sync report
-        end
+        OKF->>OKF: Compute puts and deletes
+        OKF->>DB: Execute one mixed put/delete batch
+        DB-->>OKF: Commit or rollback atomically
+        OKF-->>CLI: Sync report
     end
 ```
 
 Detailed steps:
 
-1. Enumerate the bundle and record each regular file's relative path, size, and
-   modification time.
+1. Enumerate the bundle in deterministic path order.
 2. Read, parse, and validate all relevant files. No database transaction is open
    during filesystem I/O.
 3. If any validation error exists, return the report and perform no writes. In
    strict mode, warnings have the same command-level effect.
 4. Build the complete concept map, resolve links, invert backlinks, and generate
    canonical projections and hashes.
-5. Call `ListPaths("")`. Because this is a dedicated index, every returned path is
-   owned by the synchronizer.
-6. For a staged path already in the index, call `Get` and compare
+5. If the index exists, verify its schema and call `ListPaths("")`. Because this is
+   a dedicated index, every returned path is owned by the synchronizer. If it is
+   absent, use an empty existing-path set.
+6. For a staged path already in an existing index, call `Get` and compare
    `okf_projection_hash`. Skip an identical projection. A missing or malformed hash
    schedules a put.
 7. Schedule deletion for every indexed path absent from the staged path set. A
    rename is therefore one put plus one delete.
-8. Re-enumerate path, size, and modification time metadata. Abort without writes if
-   it differs. This is best-effort concurrent-edit detection, not a filesystem
-   transaction.
-9. Execute all puts and deletes in one existing MiniStore batch transaction.
-10. Return deterministic counts and the validation report.
+8. If the index is absent, create it with the canonical schema. Execute all puts
+   and deletes in one MiniStore batch transaction.
+9. Return deterministic counts and the validation report.
 
 The initial implementation deliberately uses one `Get` per existing staged path.
 For SQLite this is local. For PostgreSQL it can be expensive, but it preserves
@@ -813,13 +799,17 @@ justifies a future `GetMany(paths, fields)` API; it is not part of this design.
 
 ### Failure and concurrency semantics
 
-- Parse, validation, projection, or stability-check failure leaves the index
-  unchanged.
-- A database failure rolls back every put and delete.
+- Parse, validation, or projection failure leaves an existing index unchanged. The
+  command validates a missing target before creating it, so ordinary format errors
+  do not leave an index behind.
+- A failure after `sync` creates a missing index may leave an empty index with the
+  canonical schema; the next `sync` can reuse it. Database batch failures still
+  roll back every put and delete.
 - A killed process before commit leaves the prior index state.
 - A killed process after commit leaves the complete new state.
-- Concurrent bundle edits are detected on a best-effort basis and otherwise
-  converge on the next sync.
+- Concurrent bundle edits may produce a projection of the bytes observed during
+  that run and converge on the next sync. Filesystem metadata rechecks cannot
+  provide snapshot isolation and are therefore not part of the design.
 - Concurrent sync commands against the same index are unsupported. Database
   transactions prevent physical corruption, but the last commit may represent an
   older filesystem snapshot. Callers must serialize sync jobs.
@@ -873,37 +863,26 @@ type Finding struct {
     Message     string   `json:"message"`
 }
 
-type LoadOptions struct {
-    TargetVersion    string
-    LenientDelimiters bool
-    MaxFileBytes     int64
-    MaxBundleBytes   int64
-    MaxFiles         int
-    MaxYAMLDepth     int
-    MaxYAMLNodes     int
-    MaxLinksPerDoc   int
-}
-
 type ValidateOptions struct {
-    LoadOptions
-    Today time.Time
+    TargetVersion string
 }
 
 type SyncOptions struct {
-    ValidateOptions
-    Strict bool
+    TargetVersion string
+    Strict        bool
 }
 
-func ParseDocument(path string, raw []byte, opts LoadOptions) (Document, []Finding, error)
+func ParseDocument(path string, raw []byte) (Document, []Finding, error)
 func ValidateBundle(ctx context.Context, root string, opts ValidateOptions) (ValidationReport, error)
 func ProjectionSchema() ministore.Schema
-func BuildProjection(bundle Bundle, opts ValidateOptions) (Projection, error)
+func BuildProjections(bundle Bundle) ([]Projection, error)
 func Sync(ctx context.Context, root string, ix *ministore.Index, opts SyncOptions) (SyncReport, error)
 ```
 
-`error` is reserved for operational failures: I/O, resource exhaustion, context
-cancellation, or database errors. Format problems are findings so callers can show
-all diagnostics in one pass.
+`error` is reserved for operational failures: I/O, context cancellation, or
+database errors. Format problems are findings so callers can show all diagnostics
+in one pass. `Sync` operates on an open index; the CLI performs missing-index
+creation before calling it.
 
 ### Rust
 
@@ -920,7 +899,7 @@ pub struct Finding {
     pub message: String,
 }
 
-pub fn parse_document(path: &str, raw: &[u8], options: &LoadOptions)
+pub fn parse_document(path: &str, raw: &[u8])
     -> Result<Parsed<Document>>;
 
 pub fn validate_bundle(root: &Path, options: &ValidateOptions)
@@ -928,15 +907,16 @@ pub fn validate_bundle(root: &Path, options: &ValidateOptions)
 
 pub fn projection_schema() -> ministore::Schema;
 
-pub fn build_projection(bundle: Bundle, options: &ValidateOptions)
-    -> Result<Projection>;
+pub fn build_projections(bundle: Bundle)
+    -> Result<Vec<Projection>>;
 
 pub fn sync(root: &Path, index: &ministore::Index, options: &SyncOptions)
     -> Result<SyncReport>;
 ```
 
 Rust format problems likewise live in `ValidationReport`; `Result::Err` denotes an
-operational failure that prevented a complete report.
+operational failure that prevented a complete report. The Rust `sync` function also
+operates on an open index, with the CLI responsible for creating a missing one.
 
 ## CLI contract
 
@@ -951,20 +931,6 @@ ministore okf validate --bundle DIR [--strict] [--format pretty|json]
 Validation never opens an index. Pretty output lists findings and a summary. JSON
 uses the stable report model.
 
-### Initialize
-
-```text
-ministore okf init --bundle DIR --index INDEX [backend options] [--strict]
-```
-
-`init` refuses an existing index. It validates first, creates the canonical OKF
-schema, and performs the first sync. If sync fails after index creation, the newly
-created index may exist but contains no committed concept batch; the command reports
-the exact path/schema so the caller can remove or reuse it deliberately.
-
-Go accepts its existing `--backend sqlite|postgres` and `--schema-name` options.
-Rust accepts only its existing SQLite index path.
-
 ### Synchronize
 
 ```text
@@ -972,36 +938,22 @@ ministore okf sync --bundle DIR --index INDEX [backend options] [--strict]
                      [--dry-run] [--format pretty|json]
 ```
 
-`--dry-run` performs every step except batch execution and returns the predicted
-add/update/delete counts. It still opens and reads the index.
-
-### Status
-
-```text
-ministore okf status --bundle DIR --index INDEX [backend options]
-                       [--format pretty|json]
-```
-
-`status` is equivalent to `sync --dry-run` but uses status-oriented wording and
-never treats warnings as a synchronization failure. It is useful in CI to detect a
-stale index without modifying it. `--fail-if-dirty` returns exit status 1 when any
-add, update, or delete would occur.
+`sync` creates a missing index or updates an existing compatible index. Go accepts
+its existing `--backend sqlite|postgres` and `--schema-name` options. Rust accepts
+only its existing SQLite index path. `--dry-run` performs every step except index
+creation and batch execution and returns the predicted add/update/delete counts;
+against a missing index, every valid concept is reported as an addition.
 
 ### Exit status
 
 | Status | Meaning |
 |---:|---|
 | `0` | command succeeded; non-strict warnings may be present |
-| `1` | validation errors, strict warnings, or `--fail-if-dirty` detected drift |
-| `2` | usage, I/O, resource-limit, index-schema, or database failure |
-
-The Go CLI currently exits through individual handlers and the Rust CLI generally
-maps all errors to 1. The OKF command group may return this richer status without
-requiring unrelated commands to change immediately.
+| `1` | validation, usage, I/O, index-schema, or database failure; strict warnings also fail |
 
 ### Search examples
 
-After initialization, the ordinary MiniStore query interface is used:
+After synchronization, the ordinary MiniStore query interface is used:
 
 ```bash
 ministore search -i knowledge.db \
@@ -1084,8 +1036,9 @@ does not depend on the other repository or a network fetch.
   duplicate keys, non-string keys, and unknown tagged values;
 - single-map and list forms of `verified`;
 - scalar and list forms of `tags` and `sources` under permissive behavior;
-- depth, node, per-file, total-byte, and file-count resource limits; and
-- parser fuzz tests asserting no panic and bounded termination.
+- large documents, deeply nested YAML, and documents with many links; and
+- parser fuzz tests asserting no panic or crash, including adversarial alias and
+  nesting cases.
 
 ### Validator tests
 
@@ -1122,10 +1075,10 @@ does not depend on the other repository or a network fetch.
 - absent optional values are omitted;
 - status and title defaults;
 - trust precedence with mixed machine and human events;
-- all verification dates plus latest date;
+- latest verification date;
 - malformed optional entries remain raw but do not enter typed fields;
 - source aggregates retain every valid value;
-- source and projection hashes are stable and language-independent;
+- projection hashes are stable and language-independent;
 - arbitrary unknown frontmatter remains present in `raw_document`; and
 - projected JSON is accepted by the current MiniStore `PutJSON` implementation.
 
@@ -1139,7 +1092,6 @@ does not depend on the other repository or a network fetch.
 - malformed existing projection hash is repaired;
 - wrong MiniStore schema is rejected before writes;
 - dry run produces counts without changing the index;
-- filesystem snapshot change aborts before writes;
 - injected failure during a mixed batch rolls back puts and deletes;
 - cancellation before commit leaves the previous state;
 - Go pure-Go SQLite, Go CGO SQLite, Go PostgreSQL, and Rust bundled SQLite; and
@@ -1161,13 +1113,9 @@ existing index uses `O(C)` path lookups in the first implementation. The staged
 projection requires `O(B + L)` memory because exact concept source is retained
 until the batch is built.
 
-The design assumes bundles are repository-sized rather than internet-scale. The
-100,000-file and 1-GiB defaults make that assumption explicit. These limits are
-protective defaults, not measured capacity claims.
-
 Parsing is sequential initially. Parallel parsing would require deterministic
-diagnostic merging and duplicate resource-limit accounting while providing little
-benefit for typical bundles. Profile before adding worker pools or Rayon.
+diagnostic merging and has no demonstrated benefit. Profile before adding worker
+pools or Rayon.
 
 The full dependency pass is intentional. Incremental static-site systems commonly
 miss implicit relationships and rebuild the wrong subset. OKF backlinks make the
@@ -1178,8 +1126,10 @@ correct baseline. Hash comparison still avoids unnecessary database and FTS writ
 
 - The loader never follows symlinks or resolves paths outside the bundle root.
 - Link normalization rejects traversal and separator-smuggling encodings.
-- YAML and Markdown parsing are bounded by byte, node, depth, and link limits.
-- External URLs are never fetched during validate, init, status, or sync.
+- YAML and Markdown use maintained parsers through their normal APIs. Dependency
+  versions are pinned and fuzzed for deep nesting, aliases, and malformed syntax;
+  MiniStore does not impose content-size quotas.
+- External URLs are never fetched during validation or synchronization.
 - Attested Computation code is data only and is never executed.
 - SQL writes use existing parameterized MiniStore operations.
 - Raw frontmatter and bodies may contain secrets. Synchronization copies them into
@@ -1188,8 +1138,8 @@ correct baseline. Hash comparison still avoids unnecessary database and FTS writ
 - Validation messages must not print entire document bodies or secret values.
 - `raw_document` can make search result payloads large. Default search output
   remains path-only; callers must explicitly request `--show all`.
-- A malicious bundle can contain many warnings. Reports cap displayed pretty
-  findings while JSON returns all findings within the configured resource limits.
+- A bundle can contain many warnings. Pretty output may summarize repeated
+  findings for readability; JSON returns the complete report.
 
 ## Schema evolution and compatibility
 
@@ -1211,6 +1161,8 @@ This prevents upstream proposals from silently changing retrieval behavior.
 
 - Run `okf validate` in bundle CI before merging knowledge changes.
 - Run `okf sync` after deploying or checking out the validated bundle.
+- Keep a stable bundle-to-index mapping. Synchronizing a different bundle into an
+  existing OKF index replaces that index's contents.
 - Serialize sync jobs per index.
 - Keep the bundle in version control and treat the MiniStore database as rebuildable
   deployment state.
@@ -1281,9 +1233,9 @@ designed from demonstrated demand.
 |---|---|---|
 | Go and Rust YAML parsers interpret scalars differently | divergent projections | read recognized values from YAML nodes using explicit shared coercion rules and golden fixtures |
 | Upstream OKF evolves rapidly | silent semantic drift | pin v0.2 text/hash, preserve unknowns, warn on newer versions, bump projection only after review |
-| Full staging uses too much memory | sync failure on unusually large bundles | configurable limits, clear resource errors, measure before designing streaming graph storage |
+| Full staging uses too much memory | sync fails when the machine cannot hold the projection | document the `O(B + L)` model; measure real workloads before adding streaming or spill-to-disk complexity |
 | PostgreSQL performs one lookup per concept | slow sync latency | projection hashes skip writes; add measured `GetMany` optimization only if needed |
-| Bundle changes during sync | index represents a mixed snapshot | pre/post filesystem metadata check, atomic DB batch, next sync convergence |
+| Bundle changes during sync | index reflects bytes observed at different moments | atomic database batch and convergence on the next sync; callers serialize bundle writes when a point-in-time view is required |
 | Raw source contains sensitive data | database expands secret exposure | document inheritance of bundle security boundary; never print raw content in diagnostics |
 | Case-insensitive filesystems collapse distinct IDs | non-portable bundle | case-fold collision warning and fixture coverage |
 | Parser library changes behavior | hash and report instability | lock dependencies, golden tests, review dependency upgrades as compatibility changes |
@@ -1292,33 +1244,16 @@ designed from demonstrated demand.
 
 ### Assumptions
 
-- Bundles are small enough to parse and stage within the configurable defaults.
-  This is a design requirement, not yet a benchmark result.
+- The machine running synchronization has enough memory and storage for the input.
+  MiniStore does not impose a smaller policy limit.
 - A dedicated index per bundle is operationally acceptable. If users require
   aggregate search, a separate design must define bundle identity and link scope.
-- Bundle writers normally serialize changes before invoking sync. Concurrent edit
-  detection is defensive, not transactional filesystem isolation.
+- Bundle writers serialize changes before invoking sync when they require a
+  point-in-time projection.
 - Users value exact concept retrieval, but do not require the MiniStore database to
   archive all bundle files.
 - OKF v0.2 remains readable using best-effort behavior when optional future fields
   are added.
-
-### Open questions to resolve before implementation freezes
-
-1. Should a UTF-8 BOM be accepted with a warning, matching permissive upstream
-   behavior, or rejected as a delimiter violation in strict parsing?
-2. Should malformed optional date values be omitted from typed projection, as this
-   design proposes, or indexed as keyword fallbacks for discoverability?
-3. Does the Go PostgreSQL adapter need a batch read API before the first release, or
-   are measured target bundle sizes small enough for individual `Get` calls?
-4. Should `status` values outside the v0.2 enum be indexed verbatim or omitted? This
-   design favors verbatim indexing so extensions remain discoverable.
-5. Which exact Goldmark options produce the closest event parity with
-   `pulldown-cmark`, especially for footnotes and autolinks?
-
-These questions do not change the architectural boundary. They must be answered in
-the shared fixtures before implementation so Go and Rust do not make independent
-choices.
 
 ## Implementation sequence
 
@@ -1327,7 +1262,7 @@ choices.
 - [ ] Commit the pinned OKF v0.2 fixture corpus and `MANIFEST.sha256` to both repositories.
 - [ ] Freeze finding codes, normalized validation JSON, and projection golden JSONL.
 - [ ] Implement byte-preserving delimiter splitting in Go and Rust.
-- [ ] Implement bounded YAML-node traversal and recognized-field accessors.
+- [ ] Implement YAML-node traversal and recognized-field accessors.
 - [ ] Implement parser fuzz/property tests and raw-byte retention tests.
 
 ### Phase 2: validation
@@ -1346,7 +1281,7 @@ choices.
 - [ ] Implement two-pass forward links and backlinks.
 - [ ] Implement trust, lifecycle, provenance, date, and legacy derivation.
 - [ ] Implement the canonical OKF MiniStore schema in both languages.
-- [ ] Implement canonical JSON and source/projection hashing.
+- [ ] Implement canonical JSON and projection hashing.
 - [ ] Make projection golden outputs byte-identical across repositories.
 
 ### Phase 4: MiniStore integration
@@ -1354,9 +1289,9 @@ choices.
 - [ ] Add and test `ListPaths(prefix)` in Go SQLite, Go PostgreSQL, and Rust SQLite.
 - [ ] Implement dedicated-index schema verification.
 - [ ] Implement projection comparison and mixed transactional put/delete batches.
-- [ ] Implement filesystem stability recheck and dry-run classification.
+- [ ] Implement dry-run classification.
 - [ ] Add rollback, cancellation, rename, deletion, and backlink-only sync tests.
-- [ ] Add `okf init`, `okf sync`, and `okf status` to both CLIs.
+- [ ] Add `okf sync` to both CLIs, including missing-index creation.
 
 ### Phase 5: parity, performance, and release
 
@@ -1364,7 +1299,7 @@ choices.
 - [ ] Benchmark representative 1k, 10k, and 100k concept bundles for time and memory.
 - [ ] Measure Go PostgreSQL lookup overhead and decide whether `GetMany` is justified.
 - [ ] Run offline integration tests against pinned upstream sample bundles.
-- [ ] Document query examples, security implications, limits, and rebuild procedures.
+- [ ] Document query examples, security implications, resource behavior, and rebuild procedures.
 - [ ] Publish projection version 1 only after Go/Rust parity and backend matrices pass.
 
 ## References and research notes
