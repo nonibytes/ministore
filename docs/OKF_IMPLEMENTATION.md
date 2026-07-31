@@ -3,9 +3,9 @@
 ## Repositories
 
 - Go: `codex/okf-implementation`; latest feature commit
-  `5d4f33fbe5abc262168da4f6abe280f3d6253a2c`
+  `051e69c1a129c3b454f4667ac36a6357213814b7`
 - Rust: `codex/okf-implementation`; latest feature commit
-  `a5ca1726ca7cebe67572b0efa3a657e144f521a0`
+  `30ea1a79c7f3748435c043878b3dd87c27f988fc`
 
 ## Work queue
 
@@ -14,7 +14,8 @@
 - [x] Add the pinned fixture corpus and matching manifests.
 - [x] Freeze the finding-code catalog in both public APIs.
 - [ ] Add normalized validation, projection, graph, hash, and sync golden outputs.
-  (in progress: shared base-conformance validation JSONL complete)
+  (in progress: shared base, reserved, version, lifecycle, tags, and legacy
+  validation JSONL complete)
 - [x] Implement lossless delimiter parsing and YAML accessors in both languages.
 - [x] Add parser property/fuzz coverage and raw-byte tests.
 
@@ -30,14 +31,15 @@
 ### Phase 3 — Parsing and validation
 
 - [ ] Add the Go `okf` package and Rust `ministore-okf` crate. (in progress:
-  lossless parser, YAML-node access, base validator, and reserved-file validator
-  complete)
+  lossless parser, YAML-node access, base/reserved validator, and the first
+  advisory validators complete)
 - [ ] Implement the complete finding catalog and deterministic disk-backed reports.
   (in progress: catalog frozen; private SQLite entry/finding stage and ordered
   finding stream complete)
 - [ ] Validate reserved files, versions, optional families, legacy metadata, actors,
-  lifecycle, provenance, trust, and attested computations. (base concept and
-  AST-aware reserved-file conformance complete)
+  lifecycle, provenance, trust, and attested computations. (base concept,
+  AST-aware reserved files, versions, lifecycle, tags, and v0.1 fallbacks
+  complete; provenance, trust/actors, and attestation pending)
 - [ ] Add equivalent `okf validate` library and CLI behavior.
 
 ### Phase 4 — Graph and projection
@@ -70,10 +72,10 @@
 
 - `go test ./...` — passed.
 - `cargo test --workspace` — passed (54 core unit tests, 22 core integration
-  tests, and 18 OKF parser/validation tests).
+  tests, and 21 OKF parser/validation tests).
 - `git diff --check` in both repositories — passed before commit.
 - `sha256sum -c testdata/okf/v0.2/MANIFEST.sha256` in both repositories —
-  passed for all 110 fixture and golden files.
+  passed for all 111 fixture and golden files.
 - `diff -qr` between the Go and Rust fixture trees — no differences.
 - `diff -qr` between each committed upstream sample and commit
   `3fcbb9f828c2f23d109c855ee403c3a4c81f3a96` — no differences; pinned
@@ -129,3 +131,7 @@
   The validators ignore markup inside fenced code, accept inline and reference
   links, report source-line starts consistently across languages, and stage all
   findings in SQLite before deterministic emission.
+- Root version declarations accept YAML scalar spelling such as quoted or bare
+  `0.2`, but require `<major>.<minor>` digits and warn when the declared version is
+  invalid or unsupported. Rust YAML event positions use the physical frontmatter
+  line offset so advisory locations match Go and the shared golden exactly.
