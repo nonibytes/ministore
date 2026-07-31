@@ -3,9 +3,9 @@
 ## Repositories
 
 - Go: `codex/okf-implementation`; latest feature commit
-  `1140977ab385fe7a488075c44a2638a44067acff`
+  `ebd2607231cfefd6c547e8d0a78e6dfe0dde77b3`
 - Rust: `codex/okf-implementation`; latest feature commit
-  `1d751584c0575ede0393b3633a9b125d991dd67c`
+  `dd89cdd907f6e5eea69116c7e2efb75525b843e4`
 
 ## Work queue
 
@@ -14,6 +14,7 @@
 - [x] Add the pinned fixture corpus and matching manifests.
 - [x] Freeze the finding-code catalog in both public APIs.
 - [ ] Add normalized validation, projection, graph, hash, and sync golden outputs.
+  (in progress: shared base-conformance validation JSONL complete)
 - [x] Implement lossless delimiter parsing and YAML accessors in both languages.
 - [x] Add parser property/fuzz coverage and raw-byte tests.
 
@@ -29,10 +30,13 @@
 ### Phase 3 — Parsing and validation
 
 - [ ] Add the Go `okf` package and Rust `ministore-okf` crate. (in progress:
-  lossless parser and YAML-node foundation complete)
+  lossless parser, YAML-node access, and base validator complete)
 - [ ] Implement the complete finding catalog and deterministic disk-backed reports.
+  (in progress: catalog frozen; private SQLite entry/finding stage and ordered
+  finding stream complete)
 - [ ] Validate reserved files, versions, optional families, legacy metadata, actors,
-  lifecycle, provenance, trust, and attested computations.
+  lifecycle, provenance, trust, and attested computations. (base concept
+  conformance complete)
 - [ ] Add equivalent `okf validate` library and CLI behavior.
 
 ### Phase 4 — Graph and projection
@@ -44,7 +48,9 @@
 
 ### Phase 5 — Synchronization
 
-- [ ] Implement secure temporary SQLite staging and cleanup.
+- [ ] Implement secure temporary SQLite staging and cleanup. (validation entry and
+  finding tables, owner-only lifecycle, and cleanup complete; graph/action tables
+  pending)
 - [ ] Implement disk-backed target comparison and action classification.
 - [ ] Implement atomic streamed apply, dry run, strict mode, schema verification,
   missing-index creation, reports, and unchanged timestamp preservation.
@@ -63,10 +69,10 @@
 
 - `go test ./...` — passed.
 - `cargo test --workspace` — passed (54 core unit tests, 22 core integration
-  tests, and 8 OKF integration tests).
+  tests, and 15 OKF parser/validation tests).
 - `git diff --check` in both repositories — passed before commit.
 - `sha256sum -c testdata/okf/v0.2/MANIFEST.sha256` in both repositories —
-  passed for all 109 fixture files.
+  passed for all 110 fixture and golden files.
 - `diff -qr` between the Go and Rust fixture trees — no differences.
 - `diff -qr` between each committed upstream sample and commit
   `3fcbb9f828c2f23d109c855ee403c3a4c81f3a96` — no differences; pinned
@@ -83,6 +89,8 @@
 - `cargo clippy -p ministore-okf --all-targets -- -D warnings` — passed.
 - `cargo test -p ministore-okf` — passed, including generated arbitrary-input
   property cases; `cargo test --workspace` also passed.
+- The shared `expected/base-validation.jsonl` golden passed byte-for-byte in Go
+  and Rust; the complete fixture trees and manifests remain identical.
 
 ## Blockers
 
@@ -110,3 +118,9 @@
 - PostgreSQL treats a missing FTS table as an error that aborts the transaction even
   if the adapter later ignores the error. Schema-aware deletes therefore skip FTS
   SQL entirely when an index has no text fields.
+- Bundle enumeration writes paths directly to SQLite from streaming directory
+  iterators. SQLite supplies global bytewise ordering, avoiding a complete in-memory
+  path list even for a flat directory containing the whole bundle.
+- Parser-specific YAML syntax locations are omitted only from normalized parity
+  goldens; stable finding code, severity, path, and specification section remain
+  identical, while each public finding retains any location its parser provides.
