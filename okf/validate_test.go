@@ -12,11 +12,12 @@ import (
 )
 
 type normalizedValidation struct {
-	Fixture  string              `json:"fixture"`
-	Concepts int                 `json:"concepts"`
-	Errors   int                 `json:"errors"`
-	Warnings int                 `json:"warnings"`
-	Findings []normalizedFinding `json:"findings"`
+	Fixture         string              `json:"fixture"`
+	DeclaredVersion *string             `json:"declared_version,omitempty"`
+	Concepts        int                 `json:"concepts"`
+	Errors          int                 `json:"errors"`
+	Warnings        int                 `json:"warnings"`
+	Findings        []normalizedFinding `json:"findings"`
 }
 
 type normalizedFinding struct {
@@ -48,7 +49,7 @@ func TestBaseValidationGolden(t *testing.T) {
 			t.Fatalf("ValidateBundle(%s): %v", expected.Fixture, err)
 		}
 		actual := normalizedValidation{
-			Fixture: expected.Fixture, Concepts: summary.Concepts,
+			Fixture: expected.Fixture, DeclaredVersion: summary.DeclaredVersion, Concepts: summary.Concepts,
 			Errors: summary.Errors, Warnings: summary.Warnings,
 			Findings: normalizeFindings(findings),
 		}
@@ -91,6 +92,9 @@ func TestValidateBundleBaseConformanceFixtures(t *testing.T) {
 		{name: "invalid/invalid-yaml", concepts: 1, errors: 1, codes: []FindingCode{CodeInvalidYAML}},
 		{name: "invalid/malformed-index", concepts: 1, errors: 2, codes: []FindingCode{CodeMalformedIndex, CodeIndexEntryNotLinkFirst}},
 		{name: "invalid/malformed-log", concepts: 0, errors: 1, codes: []FindingCode{CodeMalformedLogDate}},
+		{name: "permissive/lifecycle-legacy", concepts: 1, warnings: 5, codes: []FindingCode{CodeMalformedStatus, CodeMalformedStaleAfter, CodeMalformedTags, CodeLegacyTimestamp, CodeLegacyCitations}},
+		{name: "permissive/newer-version", concepts: 1, warnings: 1, codes: []FindingCode{CodeUnsupportedVersion}},
+		{name: "permissive/scalar-tags", concepts: 1, warnings: 1, codes: []FindingCode{CodeMalformedTags}},
 	}
 
 	for _, test := range tests {
@@ -106,6 +110,9 @@ func TestValidateBundleBaseConformanceFixtures(t *testing.T) {
 			}
 			if summary.TargetVersion != "0.2" || summary.Concepts != test.concepts || summary.Errors != test.errors || summary.Warnings != test.warnings {
 				t.Fatalf("summary = %+v", summary)
+			}
+			if test.name == "valid/minimal" && (summary.DeclaredVersion == nil || *summary.DeclaredVersion != "0.2") {
+				t.Fatalf("declared version = %v", summary.DeclaredVersion)
 			}
 			if summary.OK() != (test.errors == 0) {
 				t.Fatalf("summary.OK() = %v", summary.OK())

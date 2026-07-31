@@ -59,13 +59,15 @@ func ValidateBundle(ctx context.Context, root string, opts ValidateOptions, emit
 	if err := validateStagedConcepts(ctx, stage, absoluteRoot); err != nil {
 		return ValidationSummary{}, err
 	}
-	if err := validateStagedReservedFiles(ctx, stage, absoluteRoot); err != nil {
+	declaredVersion, err := validateStagedReservedFiles(ctx, stage, absoluteRoot)
+	if err != nil {
 		return ValidationSummary{}, err
 	}
 	summary, err = stage.summary(ctx, absoluteRoot, targetVersion)
 	if err != nil {
 		return ValidationSummary{}, fmt.Errorf("summarize OKF validation: %w", err)
 	}
+	summary.DeclaredVersion = declaredVersion
 	if err := stage.emitFindings(ctx, emit); err != nil {
 		return ValidationSummary{}, fmt.Errorf("emit OKF validation finding: %w", err)
 	}
@@ -171,6 +173,7 @@ func validateStagedConcepts(ctx context.Context, stage *validationStage, root st
 			return fmt.Errorf("parse OKF concept %q: %w", relative, err)
 		}
 		findings = append(findings, validateConceptBase(document)...)
+		findings = append(findings, validateConceptAdvisories(document)...)
 
 		tx, err := stage.db.BeginTx(ctx, nil)
 		if err != nil {
