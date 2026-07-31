@@ -3,9 +3,9 @@
 ## Repositories
 
 - Go: `codex/okf-implementation`; latest feature commit
-  `d8ca74fc01ee4272ac76798de09db77aac3a6628`
+  `1140977ab385fe7a488075c44a2638a44067acff`
 - Rust: `codex/okf-implementation`; latest feature commit
-  `6bcdf473653d1e899644508093a5c902ce2edd2d`
+  `1d751584c0575ede0393b3633a9b125d991dd67c`
 
 ## Work queue
 
@@ -21,9 +21,9 @@
 
 - [x] Implement and test ordered streaming path scans in Go SQLite, Go PostgreSQL,
   and Rust SQLite.
-- [ ] Implement transaction-scoped streamed writers in Go and Rust.
-- [ ] Delegate existing in-memory batches to the streamed writers.
-- [ ] Test rollback, cancellation, mixed operations, document frequencies, ordering,
+- [x] Implement transaction-scoped streamed writers in Go and Rust.
+- [x] Delegate existing in-memory batches to the streamed writers.
+- [x] Test rollback, cancellation, mixed operations, document frequencies, ordering,
   and Rust connection locking.
 
 ### Phase 3 — Parsing and validation
@@ -62,10 +62,8 @@
 ## Verification record
 
 - `go test ./...` — passed.
-- `cargo test --workspace` — passed (54 unit tests and 17 integration tests,
-  including both ordered path-scan tests).
-- `MINISTORE_POSTGRES_TEST_DSN=... go test ./ministore -run
-  '^TestScanPathsPostgres$' -count=1` against `postgres:17-alpine` — passed.
+- `cargo test --workspace` — passed (54 core unit tests, 22 core integration
+  tests, and 8 OKF integration tests).
 - `git diff --check` in both repositories — passed before commit.
 - `sha256sum -c testdata/okf/v0.2/MANIFEST.sha256` in both repositories —
   passed for all 109 fixture files.
@@ -77,6 +75,10 @@
 - `go test ./okf -run '^$' -fuzz '^FuzzParseDocument$' -fuzztime=5s` —
   passed after 213,163 executions.
 - `CGO_ENABLED=0 go test -mod=readonly ./...` — passed.
+- `go test -race ./ministore/...` and `go vet ./...` — passed.
+- `MINISTORE_POSTGRES_TEST_DSN=... go test ./ministore -run
+  'Test(WriteBatch|ScanPaths)Postgres' -count=1` against `postgres:17-alpine` —
+  passed, including rollback and keyword document-frequency checks.
 - `rustfmt --check` on the new `ministore-okf` crate — passed.
 - `cargo clippy -p ministore-okf --all-targets -- -D warnings` — passed.
 - `cargo test -p ministore-okf` — passed, including generated arbitrary-input
@@ -101,3 +103,10 @@
 - Rust uses the low-level `yaml-rust2` event API because its convenience loader
   rejects duplicate keys. Alias nodes remain finite and resolve lazily, so cyclic
   extensions are preserved without whole-tree expansion.
+- Go streamed puts release keyword-ID and document-frequency state after each
+  document. This keeps memory proportional to one input document without an input
+  limit; optional byte-bounded coalescing remains a measured optimization, not a
+  correctness requirement. Deletes flush pending deltas before decrementing.
+- PostgreSQL treats a missing FTS table as an error that aborts the transaction even
+  if the adapter later ignores the error. Schema-aware deletes therefore skip FTS
+  SQL entirely when an index has no text fields.
