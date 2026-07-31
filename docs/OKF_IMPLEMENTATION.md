@@ -3,9 +3,9 @@
 ## Repositories
 
 - Go: `codex/okf-implementation`; latest feature commit
-  `ebd2607231cfefd6c547e8d0a78e6dfe0dde77b3`
+  `5d4f33fbe5abc262168da4f6abe280f3d6253a2c`
 - Rust: `codex/okf-implementation`; latest feature commit
-  `dd89cdd907f6e5eea69116c7e2efb75525b843e4`
+  `a5ca1726ca7cebe67572b0efa3a657e144f521a0`
 
 ## Work queue
 
@@ -30,13 +30,14 @@
 ### Phase 3 — Parsing and validation
 
 - [ ] Add the Go `okf` package and Rust `ministore-okf` crate. (in progress:
-  lossless parser, YAML-node access, and base validator complete)
+  lossless parser, YAML-node access, base validator, and reserved-file validator
+  complete)
 - [ ] Implement the complete finding catalog and deterministic disk-backed reports.
   (in progress: catalog frozen; private SQLite entry/finding stage and ordered
   finding stream complete)
 - [ ] Validate reserved files, versions, optional families, legacy metadata, actors,
-  lifecycle, provenance, trust, and attested computations. (base concept
-  conformance complete)
+  lifecycle, provenance, trust, and attested computations. (base concept and
+  AST-aware reserved-file conformance complete)
 - [ ] Add equivalent `okf validate` library and CLI behavior.
 
 ### Phase 4 — Graph and projection
@@ -69,7 +70,7 @@
 
 - `go test ./...` — passed.
 - `cargo test --workspace` — passed (54 core unit tests, 22 core integration
-  tests, and 15 OKF parser/validation tests).
+  tests, and 18 OKF parser/validation tests).
 - `git diff --check` in both repositories — passed before commit.
 - `sha256sum -c testdata/okf/v0.2/MANIFEST.sha256` in both repositories —
   passed for all 110 fixture and golden files.
@@ -124,3 +125,7 @@
 - Parser-specific YAML syntax locations are omitted only from normalized parity
   goldens; stable finding code, severity, path, and specification section remain
   identical, while each public finding retains any location its parser provides.
+- Reserved Markdown is parsed one file at a time with CommonMark AST/event APIs.
+  The validators ignore markup inside fenced code, accept inline and reference
+  links, report source-line starts consistently across languages, and stage all
+  findings in SQLite before deterministic emission.
