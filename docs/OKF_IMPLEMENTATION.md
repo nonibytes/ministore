@@ -3,18 +3,19 @@
 ## Repositories
 
 - Go: `codex/okf-implementation`; latest feature commit
-  `18c9eec3ee7c5ad6ab5eab168c039f7966879d72`
+  `d8ca74fc01ee4272ac76798de09db77aac3a6628`
 - Rust: `codex/okf-implementation`; latest feature commit
-  `67ea72d99b6e3316f8f2356180a190c0d28abef2`
+  `6bcdf473653d1e899644508093a5c902ce2edd2d`
 
 ## Work queue
 
 ### Phase 1 — Shared contract and fixtures
 
 - [x] Add the pinned fixture corpus and matching manifests.
-- [ ] Freeze finding codes and normalized validation, projection, and sync outputs.
-- [ ] Implement lossless delimiter parsing and YAML accessors in both languages.
-- [ ] Add parser properties, fuzz targets, and raw-byte tests.
+- [x] Freeze the finding-code catalog in both public APIs.
+- [ ] Add normalized validation, projection, graph, hash, and sync golden outputs.
+- [x] Implement lossless delimiter parsing and YAML accessors in both languages.
+- [x] Add parser property/fuzz coverage and raw-byte tests.
 
 ### Phase 2 — MiniStore streaming primitives
 
@@ -27,7 +28,8 @@
 
 ### Phase 3 — Parsing and validation
 
-- [ ] Add the Go `okf` package and Rust `ministore-okf` crate.
+- [ ] Add the Go `okf` package and Rust `ministore-okf` crate. (in progress:
+  lossless parser and YAML-node foundation complete)
 - [ ] Implement the complete finding catalog and deterministic disk-backed reports.
 - [ ] Validate reserved files, versions, optional families, legacy metadata, actors,
   lifecycle, provenance, trust, and attested computations.
@@ -71,6 +73,14 @@
 - `diff -qr` between each committed upstream sample and commit
   `3fcbb9f828c2f23d109c855ee403c3a4c81f3a96` — no differences; pinned
   `SPEC.md` SHA-256 also matched the design.
+- `go test -mod=readonly ./okf` and `go vet ./okf` — passed.
+- `go test ./okf -run '^$' -fuzz '^FuzzParseDocument$' -fuzztime=5s` —
+  passed after 213,163 executions.
+- `CGO_ENABLED=0 go test -mod=readonly ./...` — passed.
+- `rustfmt --check` on the new `ministore-okf` crate — passed.
+- `cargo clippy -p ministore-okf --all-targets -- -D warnings` — passed.
+- `cargo test -p ministore-okf` — passed, including generated arbitrary-input
+  property cases; `cargo test --workspace` also passed.
 
 ## Blockers
 
@@ -85,3 +95,9 @@
 - The offline corpus contains synthetic contract fixtures plus exact GA4, Stack
   Overflow, Bitcoin, and Acme Retail snapshots; expected normalized artifacts are
   intentionally generated only after the parser and validation contracts exist.
+- The design's delimiter prose mentions stale example code `OKF010`, and its sample
+  JSON uses stale `OKF241`; both implementations follow the authoritative catalog:
+  BOM is `OKF107` and missing local targets are `OKF400`.
+- Rust uses the low-level `yaml-rust2` event API because its convenience loader
+  rejects duplicate keys. Alias nodes remain finite and resolve lazily, so cyclic
+  extensions are preserved without whole-tree expansion.
