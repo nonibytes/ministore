@@ -37,10 +37,10 @@ The key design decisions are:
 6. **Only concept documents become MiniStore items.** Reserved files and ancillary
    assets remain in the canonical bundle. MiniStore is a search index, not a
    general-purpose bundle archive.
-7. **Synchronization stages the complete projection before writing.** It computes
-   graph-derived fields such as backlinks against a complete snapshot, skips
-   unchanged projections by hash, and applies additions, updates, and deletions in
-   one database transaction.
+7. **Synchronization is disk-backed and memory-bounded.** It spools source,
+   validation, and graph state to a temporary SQLite database, materializes one
+   projection at a time, and streams changes through one database transaction.
+   RAM grows with the largest document and its adjacency lists, not the bundle.
 8. **Errors and guidance are different.** Base-conformance violations are errors.
    Broken links and malformed optional families are warnings because OKF requires
    consumers to remain permissive.
@@ -140,6 +140,7 @@ flowchart LR
         V["Conformance validator"]
         M["Normalizer and projection builder"]
         G["Markdown link graph"]
+        D["Temporary disk-backed stage"]
         S["Transactional synchronizer"]
     end
 
@@ -154,10 +155,12 @@ flowchart LR
     L --> V
     A --> V
     P --> V
-    P --> M
-    M --> G
-    G --> S
-    V --> S
+    P --> D
+    V --> D
+    D --> G
+    D --> M
+    G --> M
+    M --> S
     S --> J
     S --> F
     S --> T
@@ -215,8 +218,9 @@ okf/
   reserved.go       index.md and log.md validation
   links.go          Markdown AST extraction and target resolution
   projection.go     normalized OKF concept -> MiniStore JSON
+  staging.go        temporary SQLite spool and ordered iterators
   schema.go         canonical OKF index schema and projection version
-  sync.go           staging, comparison, batch update, and reports
+  sync.go           comparison, streamed transaction, and reports
   errors.go         stable error and finding codes
   testdata/         versioned conformance fixtures
 
@@ -251,6 +255,7 @@ crates/ministore-okf/
     reserved.rs
     links.rs
     projection.rs
+    staging.rs
     schema.rs
     sync.rs
     error.rs
@@ -268,26 +273,58 @@ trailing spaces, and its API is optimized for parsed content rather than exact
 source preservation. Both implementations therefore use a small, explicitly
 specified delimiter splitter and delegate only YAML parsing to a library.
 
-### Minimal MiniStore core addition
+### Minimal MiniStore core additions
 
-Synchronization must enumerate the paths currently in the dedicated index to
-delete concepts removed or renamed in the bundle. Neither implementation exposes
-an efficient path-listing API. Both cores will add the same narrow operation:
+Synchronization must enumerate existing paths without collecting every path in
+RAM, and it must execute operations incrementally without committing partial
+chunks. The existing `ListPaths` proposal and `Batch` types both retain an entire
+workload in memory. Both cores therefore add two streaming operations.
 
 Go:
 
 ```go
-func (ix *Index) ListPaths(ctx context.Context, prefix string) ([]string, error)
+func (ix *Index) ScanPaths(
+    ctx context.Context,
+    prefix string,
+    yield func(path string) error,
+) error
+
+func (ix *Index) WriteBatch(
+    ctx context.Context,
+    write func(*BatchWriter) error,
+) (int, error)
 ```
 
 Rust:
 
 ```rust
-pub fn list_paths(&self, prefix: &str) -> Result<Vec<String>>
+pub fn scan_paths<F>(&self, prefix: &str, yield_path: F) -> Result<()>
+where
+    F: FnMut(&str) -> Result<()>;
+
+pub fn write_batch<F>(&self, write: F) -> Result<usize>
+where
+    F: FnOnce(&mut BatchWriter<'_>) -> Result<()>;
 ```
 
-The methods return paths in ascending bytewise order. An empty prefix lists every
-item. A non-empty prefix performs a literal prefix match; it is not a query glob.
+`ScanPaths`/`scan_paths` yields paths in ascending bytewise order. An empty prefix
+scans every item. A non-empty prefix is a literal prefix, not a query glob.
+SQLite uses `BINARY` collation; PostgreSQL must use `COLLATE "C"` (or an equivalent
+bytewise comparison) rather than the database's locale collation.
+
+`WriteBatch`/`write_batch` opens one transaction, invokes the callback, and commits
+only when the callback succeeds. `BatchWriter` exposes `PutJSON` and `Delete` but
+not the underlying transaction. Operations are prepared and executed as they
+arrive, so the writer does not retain them all. It may coalesce a small byte-bounded
+working batch for throughput, but reaching that budget flushes operations into the
+same transaction; it never rejects or commits part of the input. The existing
+in-memory `Batch` remains a convenience API and delegates execution to this path.
+The writer must call the transaction-scoped put/delete primitives already used by
+the existing batch implementations. It must not call public `Index.PutJSON` or
+`Index.Delete`, which open their own transactions in Go and re-lock the
+non-reentrant connection mutex in Rust. Buffered document-frequency deltas are
+also flushed periodically into the same transaction so they cannot grow with the
+whole import.
 The implementation uses a parameterized `WHERE path LIKE escaped_prefix || '%'`
 or the backend-equivalent range predicate. It must escape `%`, `_`, and the escape
 character. This API is useful beyond OKF, exposes no storage internals, and avoids
@@ -722,6 +759,44 @@ correctly update backlinks even when the current file's source bytes are unchang
 
 ## Synchronization
 
+### Disk-backed staging model
+
+Full-bundle knowledge is required to resolve links and backlinks, but full-bundle
+residency in RAM is not. Each validation, projection, or synchronization run creates
+a private temporary SQLite database using the SQLite dependency already present in
+both repositories. Go uses the existing pure-Go SQLite driver so PostgreSQL and
+CGO-free builds do not gain a native requirement; Rust uses its existing bundled
+`rusqlite`. The stage contains these logical tables:
+
+| Table | Purpose |
+|---|---|
+| `entries` | every bundle-relative path and its classification |
+| `concepts` | concept path, exact source BLOB, body offsets, and normalized recognized metadata |
+| `link_candidates` | extracted local destinations before resolution |
+| `edges` | deduplicated resolved source/target concept paths |
+| `findings` | diagnostics and their deterministic sort keys |
+| `existing_paths` | paths streamed from an existing MiniStore index |
+| `actions` | final `add`, `update`, `unchanged`, or `delete` classification |
+
+The staging schema is private and unversioned. It is created with owner-only
+permissions in the operating system's temporary directory and removed when the run
+ends. `TMPDIR` or the platform equivalent selects another disk when required. A
+disk-full or staging I/O error aborts before the target transaction begins.
+
+The loader processes one file at a time. It retains only the current parser state
+and a small insertion buffer, then writes source, normalized metadata, extracted
+links, and findings to staging. SQLite transactions, its page cache, and the
+operating-system cache provide batching without making bundle size a RAM
+requirement. Once enumeration finishes, indexed joins against `entries` resolve
+link candidates into `edges`; reverse queries produce backlinks when an individual
+projection is materialized.
+
+One complete projected document must still fit in memory because the MiniStore JSON
+write boundary accepts one document. The working set is therefore proportional to
+the largest concept plus that concept's forward links and backlinks, not to all
+concepts or all links. This is a representation requirement, not an application
+limit: allocation or disk failures are surfaced as operational errors.
+
 ### Preconditions
 
 `okf sync` requires:
@@ -744,53 +819,83 @@ sequenceDiagram
     participant CLI
     participant FS as Bundle filesystem
     participant OKF as OKF layer
+    participant Stage as Temporary SQLite stage
     participant DB as MiniStore index
 
     CLI->>OKF: Sync(bundle, index, options)
-    OKF->>FS: Enumerate and read bundle
-    OKF->>OKF: Parse all Markdown and YAML
-    OKF->>OKF: Validate reserved files and concepts
+    OKF->>Stage: Create private staging database
+    loop each bundle entry
+        OKF->>FS: Read one file
+        OKF->>OKF: Parse and validate one file
+        OKF->>Stage: Store entry, source, metadata, links, findings
+    end
+    OKF->>Stage: Resolve edges and prepare sorted findings
     alt errors or strict warnings
         OKF-->>CLI: Report; no database writes
     else acceptable bundle
-        OKF->>OKF: Resolve links and build backlinks
-        OKF->>OKF: Build documents and projection hashes
         alt index exists
-            OKF->>DB: Verify schema and ListPaths("")
-            loop each staged concept also present in index
-                OKF->>DB: Get(path)
-                DB-->>OKF: existing projection hash
-            end
+            OKF->>DB: Verify schema and ScanPaths("")
+            OKF->>Stage: Store existing paths
         else index is missing
-            OKF->>OKF: Classify every concept as added
+            OKF->>Stage: Existing path set remains empty
         end
-        OKF->>OKF: Compute puts and deletes
-        OKF->>DB: Execute one mixed put/delete batch
-        DB-->>OKF: Commit or rollback atomically
+        loop staged concepts in path order
+            OKF->>Stage: Check existing path set
+            alt new path
+                OKF->>Stage: Store add action
+            else existing path
+                OKF->>Stage: Read one concept and its adjacency lists
+                OKF->>OKF: Materialize and hash one projection
+                OKF->>DB: Read existing hash
+                OKF->>Stage: Store update or unchanged action
+            end
+        end
+        alt dry run
+            OKF-->>CLI: Counts and validation report
+        else apply
+            OKF->>DB: Begin streamed write batch
+            loop add, update, and delete actions
+                OKF->>Stage: Read one action and concept when needed
+                OKF->>DB: PutJSON or Delete
+            end
+            OKF->>DB: Commit once or roll back
+        end
         OKF-->>CLI: Sync report
     end
+    OKF->>Stage: Close and remove staging database
 ```
 
 Detailed steps:
 
-1. Enumerate the bundle in deterministic path order.
-2. Read, parse, and validate all relevant files. No database transaction is open
-   during filesystem I/O.
-3. If any validation error exists, return the report and perform no writes. In
-   strict mode, warnings have the same command-level effect.
-4. Build the complete concept map, resolve links, invert backlinks, and generate
-   canonical projections and hashes.
-5. If the index exists, verify its schema and call `ListPaths("")`. Because this is
-   a dedicated index, every returned path is owned by the synchronizer. If it is
-   absent, use an empty existing-path set.
-6. For a staged path already in an existing index, call `Get` and compare
-   `okf_projection_hash`. Skip an identical projection. A missing or malformed hash
-   schedules a put.
-7. Schedule deletion for every indexed path absent from the staged path set. A
-   rename is therefore one put plus one delete.
-8. If the index is absent, create it with the canonical schema. Execute all puts
-   and deletes in one MiniStore batch transaction.
-9. Return deterministic counts and the validation report.
+1. Create the staging database and enumerate bundle entries into it in deterministic
+   path order.
+2. Read, parse, and validate one relevant file at a time. Persist its exact source,
+   normalized recognized metadata, link candidates, and findings before moving to
+   the next file. No target database transaction is open during filesystem I/O.
+3. Resolve and deduplicate graph edges with staging queries. Persist any resulting
+   broken-link findings. If validation errors exist, return the report and perform
+   no target writes. Strict mode gives warnings the same command-level effect.
+4. If the target exists, verify its schema and stream its paths into
+   `existing_paths`. If it is absent, leave that table empty.
+5. Walk staged concepts in path order. A path absent from the target is immediately
+   classified as added. For a path present in both stores, materialize only that
+   projection, calculate its hash from staged source, metadata, and adjacency rows,
+   and compare it with the current target item. Record the action in staging, then
+   release the projection memory.
+6. Record existing target paths with no staged concept as deletes. A rename is one
+   add plus one delete. Counts come directly from the staged action table.
+7. For `--dry-run`, return those counts without creating or writing the target.
+8. Otherwise create a missing target, begin `WriteBatch`/`write_batch`, and stream
+   actions in path order. Re-materialize one projection for each add or update and
+   pass it to `PutJSON`; pass deletes directly. The writer may buffer a small amount
+   of work but executes and releases it throughout the same transaction.
+9. Commit once. On any error, roll back the target transaction, close staging, and
+   remove the temporary database.
+
+An updated projection is materialized once for classification and again while
+applying. This deliberate CPU-for-space tradeoff avoids storing a second full copy
+of projected JSON in staging. Canonical projection fixtures guarantee that both
+materializations produce the same hash and bytes.
 
 The initial implementation deliberately uses one `Get` per existing staged path.
 For SQLite this is local. For PostgreSQL it can be expensive, but it preserves
@@ -872,17 +977,33 @@ type SyncOptions struct {
     Strict        bool
 }
 
+type FindingSink func(Finding) error
+type ProjectionSink func(Projection) error
+
 func ParseDocument(path string, raw []byte) (Document, []Finding, error)
-func ValidateBundle(ctx context.Context, root string, opts ValidateOptions) (ValidationReport, error)
+func ValidateBundle(
+    ctx context.Context,
+    root string,
+    opts ValidateOptions,
+    emit FindingSink,
+) (ValidationSummary, error)
 func ProjectionSchema() ministore.Schema
-func BuildProjections(bundle Bundle) ([]Projection, error)
+func WalkProjections(
+    ctx context.Context,
+    root string,
+    opts ValidateOptions,
+    emit ProjectionSink,
+) (ValidationSummary, error)
 func Sync(ctx context.Context, root string, ix *ministore.Index, opts SyncOptions) (SyncReport, error)
 ```
 
 `error` is reserved for operational failures: I/O, context cancellation, or
 database errors. Format problems are findings so callers can show all diagnostics
-in one pass. `Sync` operates on an open index; the CLI performs missing-index
-creation before calling it.
+in one pass. Bundle-level findings and projections are emitted in deterministic
+order instead of accumulated in slices; callers that want materialized results can
+collect them. The CLI streams the same JSON report shape shown above after staging
+has established the counts. `Sync` operates on an open index; the CLI performs
+missing-index creation before calling it.
 
 ### Rust
 
@@ -902,19 +1023,23 @@ pub struct Finding {
 pub fn parse_document(path: &str, raw: &[u8])
     -> Result<Parsed<Document>>;
 
-pub fn validate_bundle(root: &Path, options: &ValidateOptions)
-    -> Result<ValidationReport>;
+pub fn validate_bundle<F>(root: &Path, options: &ValidateOptions, emit: F)
+    -> Result<ValidationSummary>
+where
+    F: FnMut(Finding) -> Result<()>;
 
 pub fn projection_schema() -> ministore::Schema;
 
-pub fn build_projections(bundle: Bundle)
-    -> Result<Vec<Projection>>;
+pub fn walk_projections<F>(root: &Path, options: &ValidateOptions, emit: F)
+    -> Result<ValidationSummary>
+where
+    F: FnMut(Projection) -> Result<()>;
 
 pub fn sync(root: &Path, index: &ministore::Index, options: &SyncOptions)
     -> Result<SyncReport>;
 ```
 
-Rust format problems likewise live in `ValidationReport`; `Result::Err` denotes an
+Rust format problems are likewise emitted findings; `Result::Err` denotes an
 operational failure that prevented a complete report. The Rust `sync` function also
 operates on an open index, with the CLI responsible for creating a missing one.
 
@@ -1092,6 +1217,11 @@ does not depend on the other repository or a network fetch.
 - malformed existing projection hash is repaired;
 - wrong MiniStore schema is rejected before writes;
 - dry run produces counts without changing the index;
+- staging memory remains approximately flat as total bundle size grows;
+- staging spills source, edges, findings, existing paths, and actions to disk;
+- disk-full and temporary-database failures occur before target writes;
+- streamed batches contain more data than the RAM working buffer without partial
+  commits;
 - injected failure during a mixed batch rolls back puts and deletes;
 - cancellation before commit leaves the previous state;
 - Go pure-Go SQLite, Go CGO SQLite, Go PostgreSQL, and Rust bundled SQLite; and
@@ -1106,12 +1236,19 @@ than automatically changing projection semantics.
 
 ## Performance model
 
-Let `F` be bundle files, `B` total bytes, `L` Markdown links, and `C` valid
-concepts. Parsing and graph construction are `O(F + B + L)`. Sorting paths and
-adjacency lists adds `O(F log F + L log L)` in the worst case. Comparing an
-existing index uses `O(C)` path lookups in the first implementation. The staged
-projection requires `O(B + L)` memory because exact concept source is retained
-until the batch is built.
+Let `F` be bundle files, `B` total bytes, `L` Markdown links, `C` valid concepts,
+`D` the largest projected document, and `A` the largest per-concept adjacency
+list. Parsing and graph construction are `O(F + B + L)`. SQLite indexes make path
+and edge insertion and lookup `O(log(F + L))` per row. Comparing an existing index
+uses `O(C)` target lookups in the first implementation.
+
+Temporary disk use is `O(B + L + F + C)`, plus SQLite journal and target database
+transaction overhead. Peak application RAM is `O(D + A + W)`, where `W` is a small
+working buffer used by parsers, SQLite, and the streamed batch writer. `W` is a
+performance budget, not an input limit: filling it flushes work to disk or into the
+open transaction. It does not truncate, reject, or commit the bundle. A single
+projected document still has to fit through the JSON API, but unrelated documents
+never need to coexist in memory.
 
 Parsing is sequential initially. Parallel parsing would require deterministic
 diagnostic merging and has no demonstrated benefit. Profile before adding worker
@@ -1133,8 +1270,10 @@ correct baseline. Hash comparison still avoids unnecessary database and FTS writ
 - Attested Computation code is data only and is never executed.
 - SQL writes use existing parameterized MiniStore operations.
 - Raw frontmatter and bodies may contain secrets. Synchronization copies them into
-  the database. The CLI documentation must state that the index inherits the
-  bundle's confidentiality requirements.
+  the temporary staging database and final index. Staging files use owner-only
+  permissions and are removed on normal completion, but crash remnants and storage
+  media may retain data. The CLI documentation must state that the temporary
+  directory and index inherit the bundle's confidentiality requirements.
 - Validation messages must not print entire document bodies or secret values.
 - `raw_document` can make search result payloads large. Default search output
   remains path-only; callers must explicitly request `--show all`.
@@ -1164,6 +1303,9 @@ This prevents upstream proposals from silently changing retrieval behavior.
 - Keep a stable bundle-to-index mapping. Synchronizing a different bundle into an
   existing OKF index replaces that index's contents.
 - Serialize sync jobs per index.
+- For a large PostgreSQL import, configure transaction and statement timeouts for
+  the expected sync duration and reserve WAL/disk capacity for one atomic change
+  set. MiniStore intentionally rolls back rather than publishing partial progress.
 - Keep the bundle in version control and treat the MiniStore database as rebuildable
   deployment state.
 - Back up the bundle, not merely the index. The index does not contain reserved and
@@ -1172,6 +1314,38 @@ This prevents upstream proposals from silently changing retrieval behavior.
   the deployment layer.
 
 ## Alternatives considered
+
+### Retain the full bundle and operation batch in RAM
+
+This makes graph construction and atomic application straightforward and is fast
+for small repositories. It was rejected because memory grows with total source and
+link volume. A general-purpose importer must not require the complete input to fit
+in RAM when the filesystem already provides suitable spill storage.
+
+### Commit multiple ordinary MiniStore batches
+
+Chunking the existing `Batch` API bounds RAM with little new core code. It was
+rejected because every chunk commits independently. Readers can observe a partially
+updated graph, and a late failure leaves additions, deletions, and backlinks from
+different bundle versions. The streamed writer keeps chunked execution but moves
+the commit boundary to the end.
+
+### Build a replacement index and swap it into place
+
+Writing a new index naturally bounds application RAM and gives SQLite a clean
+atomic file-swap story. PostgreSQL schema replacement, active readers, index
+identity, and preservation of unchanged-item timestamps make the swap different
+across current backends. A temporary staging database plus one target transaction
+provides one cross-backend contract with fewer deployment assumptions.
+
+### Use flat spill files and external sorting
+
+Append-only source and edge files can bound RAM with less storage machinery at
+first. They still require cross-platform framing, indexes or external sorting for
+target resolution, deterministic diagnostic ordering, cleanup, and random lookup
+of one concept's backlinks. SQLite already supplies those operations and is already
+embedded in both projects, so a private staging schema is the smaller maintained
+solution.
 
 ### Deserialize all YAML directly into top-level MiniStore JSON
 
@@ -1233,7 +1407,8 @@ designed from demonstrated demand.
 |---|---|---|
 | Go and Rust YAML parsers interpret scalars differently | divergent projections | read recognized values from YAML nodes using explicit shared coercion rules and golden fixtures |
 | Upstream OKF evolves rapidly | silent semantic drift | pin v0.2 text/hash, preserve unknowns, warn on newer versions, bump projection only after review |
-| Full staging uses too much memory | sync fails when the machine cannot hold the projection | document the `O(B + L)` model; measure real workloads before adding streaming or spill-to-disk complexity |
+| Temporary staging exhausts disk | sync cannot complete | estimate no acceptance cap; surface the disk error before target writes, honor the standard temporary-directory override, and clean up on every normal/error path |
+| One concept is too large to materialize | projection cannot cross the JSON document API | keep only one concept in memory, surface allocation failure, and redesign the core document API only if real single-document workloads require streaming JSON |
 | PostgreSQL performs one lookup per concept | slow sync latency | projection hashes skip writes; add measured `GetMany` optimization only if needed |
 | Bundle changes during sync | index reflects bytes observed at different moments | atomic database batch and convergence on the next sync; callers serialize bundle writes when a point-in-time view is required |
 | Raw source contains sensitive data | database expands secret exposure | document inheritance of bundle security boundary; never print raw content in diagnostics |
@@ -1244,8 +1419,10 @@ designed from demonstrated demand.
 
 ### Assumptions
 
-- The machine running synchronization has enough memory and storage for the input.
-  MiniStore does not impose a smaller policy limit.
+- The machine has enough RAM for its largest individual projected concept and
+  enough temporary disk for the bundle, graph, action table, and database journals.
+  Total bundle size is not required to fit in RAM, and MiniStore imposes no smaller
+  acceptance policy.
 - A dedicated index per bundle is operationally acceptable. If users require
   aggregate search, a separate design must define bundle identity and link scope.
 - Bundle writers serialize changes before invoking sync when they require a
@@ -1278,7 +1455,8 @@ designed from demonstrated demand.
 
 - [ ] Implement Markdown AST link extraction in Go and Rust.
 - [ ] Implement URI/path normalization, percent-decoding safety, and broken-link findings.
-- [ ] Implement two-pass forward links and backlinks.
+- [ ] Implement the private staging schema, lifecycle, secure permissions, and cleanup.
+- [ ] Implement disk-backed forward-link resolution and backlink queries.
 - [ ] Implement trust, lifecycle, provenance, date, and legacy derivation.
 - [ ] Implement the canonical OKF MiniStore schema in both languages.
 - [ ] Implement canonical JSON and projection hashing.
@@ -1286,9 +1464,12 @@ designed from demonstrated demand.
 
 ### Phase 4: MiniStore integration
 
-- [ ] Add and test `ListPaths(prefix)` in Go SQLite, Go PostgreSQL, and Rust SQLite.
+- [ ] Add and test ordered `ScanPaths` in Go SQLite, Go PostgreSQL, and Rust SQLite.
+- [ ] Add and test transaction-scoped `WriteBatch` in both cores; make existing
+  in-memory batches delegate to it.
 - [ ] Implement dedicated-index schema verification.
-- [ ] Implement projection comparison and mixed transactional put/delete batches.
+- [ ] Implement disk-backed existing-path/action classification and streamed
+  transactional puts/deletes.
 - [ ] Implement dry-run classification.
 - [ ] Add rollback, cancellation, rename, deletion, and backlink-only sync tests.
 - [ ] Add `okf sync` to both CLIs, including missing-index creation.
@@ -1297,6 +1478,7 @@ designed from demonstrated demand.
 
 - [ ] Run all shared fixtures through both implementations and compare normalized artifacts.
 - [ ] Benchmark representative 1k, 10k, and 100k concept bundles for time and memory.
+- [ ] Verify peak RAM tracks the largest concept and working buffer rather than total bundle size.
 - [ ] Measure Go PostgreSQL lookup overhead and decide whether `GetMany` is justified.
 - [ ] Run offline integration tests against pinned upstream sample bundles.
 - [ ] Document query examples, security implications, resource behavior, and rebuild procedures.
@@ -1313,6 +1495,9 @@ designed from demonstrated demand.
 - [CommonMark link specification](https://spec.commonmark.org/current/#links)
 - [Go `adrg/frontmatter`](https://github.com/adrg/frontmatter)
 - [Rust `gray_matter`](https://github.com/the-alchemists-of-arland/gray-matter-rs)
+- [SQLite temporary-file and rollback-journal behavior](https://www.sqlite.org/tempfiles.html)
+- [Apache Lucene `IndexWriter` buffering and commit behavior](https://lucene.apache.org/core/10_1_0/core/org/apache/lucene/index/IndexWriter.html)
+- [Tantivy `IndexWriter` memory-budget implementation](https://docs.rs/tantivy/latest/src/tantivy/index/index.rs.html)
 - [Jekyll incremental regeneration limitations](https://jekyllrb.com/docs/configuration/incremental-regeneration/)
 - [A recent Rust static-site generator using content hashes and explicit link checking](https://matthewberger.dev/articles/posts/building-a-static-site-generator-in-rust/)
 
@@ -1323,4 +1508,9 @@ absolute, relative, titled, fenced, and percent-encoded cases. Rust frontmatter
 libraries have had source-whitespace corruption bugs. Incremental site generators
 document missed dependencies as their central correctness problem. Together these
 findings favor raw-source preservation, AST link parsing, a permissive finding
-model, and a full graph pass over a clever incremental cache.
+model, and a full graph pass over a clever incremental cache. Lucene and Tantivy
+separately demonstrate the important distinction between flushing bounded working
+memory to disk and publishing a commit. SQLite's journaled transactions provide
+the same distinction for MiniStore staging and target writes. That prior art
+supports disk-backed staging plus one final commit instead of either an all-RAM
+batch or separately committed chunks.
