@@ -89,6 +89,8 @@ func TestValidateBundleBaseConformanceFixtures(t *testing.T) {
 		{name: "invalid/missing-frontmatter", concepts: 1, errors: 1, codes: []FindingCode{CodeMissingOpeningDelimiter}},
 		{name: "invalid/missing-type", concepts: 1, errors: 1, codes: []FindingCode{CodeMissingType}},
 		{name: "invalid/invalid-yaml", concepts: 1, errors: 1, codes: []FindingCode{CodeInvalidYAML}},
+		{name: "invalid/malformed-index", concepts: 1, errors: 2, codes: []FindingCode{CodeMalformedIndex, CodeIndexEntryNotLinkFirst}},
+		{name: "invalid/malformed-log", concepts: 0, errors: 1, codes: []FindingCode{CodeMalformedLogDate}},
 	}
 
 	for _, test := range tests {

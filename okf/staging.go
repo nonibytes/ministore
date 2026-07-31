@@ -126,13 +126,13 @@ func nullableString(value string) any {
 	return value
 }
 
-func (s *validationStage) nextConceptPath(ctx context.Context, after string) (string, bool, error) {
+func (s *validationStage) nextEntryPath(ctx context.Context, kind, after string) (string, bool, error) {
 	var path string
 	err := s.db.QueryRowContext(ctx, `
 SELECT path FROM entries
-WHERE kind = 'concept' AND path > ? COLLATE BINARY
+WHERE kind = ? AND path > ? COLLATE BINARY
 ORDER BY path COLLATE BINARY
-LIMIT 1`, after).Scan(&path)
+LIMIT 1`, kind, after).Scan(&path)
 	if err == sql.ErrNoRows {
 		return "", false, nil
 	}

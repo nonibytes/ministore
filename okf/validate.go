@@ -59,6 +59,9 @@ func ValidateBundle(ctx context.Context, root string, opts ValidateOptions, emit
 	if err := validateStagedConcepts(ctx, stage, absoluteRoot); err != nil {
 		return ValidationSummary{}, err
 	}
+	if err := validateStagedReservedFiles(ctx, stage, absoluteRoot); err != nil {
+		return ValidationSummary{}, err
+	}
 	summary, err = stage.summary(ctx, absoluteRoot, targetVersion)
 	if err != nil {
 		return ValidationSummary{}, fmt.Errorf("summarize OKF validation: %w", err)
@@ -150,7 +153,7 @@ func validateStagedConcepts(ctx context.Context, stage *validationStage, root st
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		relative, ok, err := stage.nextConceptPath(ctx, after)
+		relative, ok, err := stage.nextEntryPath(ctx, "concept", after)
 		if err != nil {
 			return fmt.Errorf("read staged OKF concept path: %w", err)
 		}
