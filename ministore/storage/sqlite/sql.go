@@ -39,6 +39,7 @@ var SQLTemplates = storage.SQL{
 	SetMeta:                 "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
 	FindItemIDByPath:        "SELECT id, created_at FROM items WHERE path = ?1",
 	GetItemByPath:           "SELECT id, data_json, created_at, updated_at FROM items WHERE path = ?1",
+	ScanPaths:               "SELECT path FROM items WHERE substr(path, 1, length(?1)) = ?1 ORDER BY path COLLATE BINARY",
 	CleanupExpiredCursors:   "DELETE FROM cursor_store WHERE expires_at < ?1",
 	GetCursor:               "SELECT payload, expires_at FROM cursor_store WHERE handle = ?1",
 	PutCursor:               "INSERT INTO cursor_store(handle, payload, created_at, expires_at) VALUES(?1,?2,?3,?4)",

@@ -174,6 +174,34 @@ func (ix *Index) Get(ctx context.Context, path string) (ItemView, error) {
 	}, nil
 }
 
+// ScanPaths yields item paths with the literal prefix in ascending bytewise
+// order. The callback must not recursively operate on the same index.
+func (ix *Index) ScanPaths(ctx context.Context, prefix string, yield func(path string) error) error {
+	if yield == nil {
+		return New(ErrIO, "path callback is required")
+	}
+
+	rows, err := ix.db.QueryContext(ctx, ix.adapter.SQL().ScanPaths, prefix)
+	if err != nil {
+		return Wrap(ErrSQL, "scan paths", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return Wrap(ErrSQL, "scan path", err)
+		}
+		if err := yield(path); err != nil {
+			return Wrap(ErrIO, "yield path", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return Wrap(ErrSQL, "scan paths", err)
+	}
+	return nil
+}
+
 // Peek retrieves just the raw JSON for an item
 func (ix *Index) Peek(ctx context.Context, path string) ([]byte, error) {
 	view, err := ix.Get(ctx, path)
