@@ -152,8 +152,9 @@ type keywordCacheKey struct {
 	value string
 }
 
-// PutExecutor reuses dictionary lookups and batches document-frequency updates
-// across multiple puts in the same transaction.
+// PutExecutor reuses dictionary lookups and batches document-frequency updates.
+// Call FlushWorkingSet periodically when the executor processes an unbounded
+// stream so its caches remain bounded by the work since the last flush.
 type PutExecutor struct {
 	exec         storage.SQLExecutor
 	sqlt         storage.SQL
@@ -272,6 +273,16 @@ func (w *PutExecutor) FlushDocFreq(ctx context.Context) error {
 		}
 		delete(w.docFreqDelta, valueID)
 	}
+	return nil
+}
+
+// FlushWorkingSet persists pending document-frequency changes and releases
+// cached keyword identifiers. The surrounding transaction remains open.
+func (w *PutExecutor) FlushWorkingSet(ctx context.Context) error {
+	if err := w.FlushDocFreq(ctx); err != nil {
+		return err
+	}
+	clear(w.keywordIDs)
 	return nil
 }
 

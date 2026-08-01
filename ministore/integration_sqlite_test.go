@@ -3,6 +3,7 @@ package ministore_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -13,6 +14,55 @@ import (
 	"github.com/ministore/ministore/ministore/storage/sqlite"
 	_ "modernc.org/sqlite"
 )
+
+func TestScanPathsSQLite(t *testing.T) {
+	ix, _ := newIndex(t, ministore.Schema{Fields: map[string]ministore.FieldSpec{
+		"marker": {Type: ministore.FieldKeyword},
+	}})
+	ctx := context.Background()
+	for _, path := range []string{"/z", "/a_", "/aa", "/a%", "/a", "/Ω", "/é"} {
+		if err := ix.PutJSON(ctx, []byte(`{"path":"`+path+`"}`)); err != nil {
+			t.Fatalf("PutJSON(%q): %v", path, err)
+		}
+	}
+
+	var got []string
+	if err := ix.ScanPaths(ctx, "/a", func(path string) error {
+		got = append(got, path)
+		return nil
+	}); err != nil {
+		t.Fatalf("ScanPaths: %v", err)
+	}
+	want := []string{"/a", "/a%", "/a_", "/aa"}
+	if !equalStrings(got, want) {
+		t.Fatalf("ScanPaths = %q, want %q", got, want)
+	}
+
+	stop := errors.New("stop")
+	called := 0
+	err := ix.ScanPaths(ctx, "", func(string) error {
+		called++
+		return stop
+	})
+	if !errors.Is(err, stop) {
+		t.Fatalf("ScanPaths callback error = %v, want %v", err, stop)
+	}
+	if called != 1 {
+		t.Fatalf("callback called %d times, want 1", called)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
 
 func monotonicNow(start time.Time) func() time.Time {
 	var mu sync.Mutex

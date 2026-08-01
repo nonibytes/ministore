@@ -7,6 +7,8 @@ toolchain go1.24.12
 require (
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/mattn/go-sqlite3 v1.14.33
+	github.com/yuin/goldmark v1.8.5
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.44.1
 )
 

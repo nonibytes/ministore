@@ -14,6 +14,7 @@ This is the Go implementation. See also: [Rust implementation](https://github.co
 - **Schema Management**: Define schemas with multiple field types and multi-value support
 - **Batch Operations**: Transactional batch inserts and deletes
 - **Multi-Backend**: SQLite (default) and PostgreSQL support
+- **Open Knowledge Format**: Validate and synchronize OKF v0.2 bundles into searchable indexes
 - **Zero CGO by Default**: Pure Go SQLite driver for easy cross-compilation
 - **CLI & Library**: Use as a Go library or standalone command-line tool
 
@@ -378,6 +379,27 @@ ministore/
 │   └── ops/             # Query operations
 └── load/                # Benchmark tests
 ```
+
+## Open Knowledge Format (OKF)
+
+Validate an OKF v0.2 bundle, synchronize it into a dedicated index, and search
+its concepts with ordinary MiniStore queries:
+
+```bash
+ministore okf validate --bundle ./knowledge --format json
+ministore okf sync --bundle ./knowledge --index knowledge.db
+ministore okf sync --bundle ./knowledge --index knowledge.db --dry-run
+```
+
+`--strict` makes warnings fail validation and block synchronization. Synchronization
+is atomic, preserves the exact source in `raw_document`, and uses disk-backed
+staging instead of retaining the bundle in RAM. The target is dedicated to one
+bundle: paths absent from the bundle are deleted.
+
+See the [OKF user guide](docs/okf.md) for bundle structure, commands, reports,
+projected fields, queries, links, library integration, storage behavior, and
+troubleshooting. The separate [engineering design](docs/DESIGN.okf.md) defines the
+implementation contract.
 
 ## Running Tests
 

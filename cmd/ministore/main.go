@@ -57,6 +57,8 @@ func main() {
 		handleDiscover(ctx, args)
 	case "stats":
 		handleStats(ctx, args)
+	case "okf":
+		handleOKF(ctx, args)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", cmd)
 		printMainHelp()
@@ -78,6 +80,7 @@ Commands:
   search    Query documents (returns matches)
   discover  Explore field values
   stats     Compute min/max/avg for fields
+  okf       Validate and synchronize OKF bundles
   help      Print this message or the help of the given subcommand(s)
 
 Options:
@@ -104,6 +107,8 @@ func printCommandHelp(cmd string) {
 		printDiscoverHelp("")
 	case "stats":
 		printStatsHelp()
+	case "okf":
+		printOKFHelp()
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", cmd)
 		os.Exit(1)
@@ -321,7 +326,7 @@ func parseArgs(input []string) *args {
 
 		if strings.HasPrefix(arg, "--") {
 			key := strings.TrimPrefix(arg, "--")
-			if key == "json" || key == "explain" {
+			if key == "json" || key == "explain" || key == "strict" || key == "dry-run" {
 				a.flags[key] = true
 				i++
 				continue

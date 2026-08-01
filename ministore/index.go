@@ -174,6 +174,34 @@ func (ix *Index) Get(ctx context.Context, path string) (ItemView, error) {
 	}, nil
 }
 
+// ScanPaths yields item paths with the literal prefix in ascending bytewise
+// order. The callback must not recursively operate on the same index.
+func (ix *Index) ScanPaths(ctx context.Context, prefix string, yield func(path string) error) error {
+	if yield == nil {
+		return New(ErrIO, "path callback is required")
+	}
+
+	rows, err := ix.db.QueryContext(ctx, ix.adapter.SQL().ScanPaths, prefix)
+	if err != nil {
+		return Wrap(ErrSQL, "scan paths", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return Wrap(ErrSQL, "scan path", err)
+		}
+		if err := yield(path); err != nil {
+			return Wrap(ErrIO, "yield path", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return Wrap(ErrSQL, "scan paths", err)
+	}
+	return nil
+}
+
 // Peek retrieves just the raw JSON for an item
 func (ix *Index) Peek(ctx context.Context, path string) ([]byte, error) {
 	view, err := ix.Get(ctx, path)
@@ -188,7 +216,7 @@ func (ix *Index) Delete(ctx context.Context, path string) (bool, error) {
 	sqlt := ix.adapter.SQL()
 	fts := ix.adapter.FTS()
 
-	return ops.DeleteByPath(ctx, ix.db, sqlt, fts, path)
+	return ops.DeleteByPathWithSchema(ctx, ix.db, sqlt, fts, ix.schema.AsStorageSchema(), path)
 }
 
 // DeleteWhere deletes items matching a query
@@ -219,7 +247,7 @@ func (ix *Index) DeleteWhere(ctx context.Context, queryStr string) (int, error) 
 	sqlt := ix.adapter.SQL()
 	fts := ix.adapter.FTS()
 
-	return ops.DeleteWhere(ctx, ix.db, sqlt, fts, compiled.ResultCTE, cteParts, builder.Args())
+	return ops.DeleteWhereWithSchema(ctx, ix.db, sqlt, fts, ix.schema.AsStorageSchema(), compiled.ResultCTE, cteParts, builder.Args())
 }
 
 // Search executes a query and returns results
@@ -416,69 +444,27 @@ func (ix *Index) MigrateRebuild(ctx context.Context, dst storage.Adapter, newSch
 	return New(ErrFeature, "MigrateRebuild not yet implemented")
 }
 
-// Batch executes a batch of operations
+// Batch executes an in-memory batch through the streamed transaction writer.
 func (ix *Index) Batch(ctx context.Context, b Batch) (int, error) {
 	if b.Empty() {
 		return 0, nil
 	}
 
-	tx, err := ix.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, Wrap(ErrSQL, "begin transaction", err)
-	}
-	defer tx.Rollback()
-
-	sqlt := ix.adapter.SQL()
-	fts := ix.adapter.FTS()
-	nowMS := ix.nowMS()
-	statements := ops.NewStatementCache(tx)
-	defer statements.Close()
-	putExecutor := ops.NewPutExecutor(statements, sqlt, fts, ix.schema.AsStorageSchema())
-
-	count := 0
-	for _, op := range b.ops {
-		switch op.Kind {
-		case batchPut:
-			prep, err := ops.PreparePutDocument(ix.schema.AsStorageSchema(), op.Document, op.DataJSON)
-			if err != nil {
-				return count, Wrap(ErrSchema, "prepare put", err)
-			}
-			_, _, err = putExecutor.Execute(ctx, prep, nowMS)
-			if err != nil {
-				return count, Wrap(ErrSQL, "execute put", err)
-			}
-		case batchDelete:
-			if err := putExecutor.FlushDocFreq(ctx); err != nil {
-				return count, Wrap(ErrSQL, "flush document frequencies", err)
-			}
-			// Find item ID
-			var itemID int64
-			var createdAt int64
-			err := tx.QueryRowContext(ctx, sqlt.FindItemIDByPath, op.Path).Scan(&itemID, &createdAt)
-			if err == sql.ErrNoRows {
-				// Item doesn't exist, skip
-				continue
-			}
-			if err != nil {
-				return count, Wrap(ErrSQL, "find item", err)
-			}
-			if err := ops.DeleteByItemID(ctx, statements, sqlt, fts, itemID); err != nil {
-				return count, Wrap(ErrSQL, "delete item", err)
+	return ix.WriteBatch(ctx, func(writer *BatchWriter) error {
+		for _, op := range b.ops {
+			switch op.Kind {
+			case batchPut:
+				if err := writer.putDocument(op.Document, op.DataJSON); err != nil {
+					return err
+				}
+			case batchDelete:
+				if err := writer.Delete(op.Path); err != nil {
+					return err
+				}
 			}
 		}
-		count++
-	}
-
-	if err := putExecutor.FlushDocFreq(ctx); err != nil {
-		return count, Wrap(ErrSQL, "flush document frequencies", err)
-	}
-	if err := statements.Close(); err != nil {
-		return count, Wrap(ErrSQL, "close prepared statements", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return count, Wrap(ErrSQL, "commit transaction", err)
-	}
-	return count, nil
+		return nil
+	})
 }
 
 // Adapter returns the underlying storage adapter

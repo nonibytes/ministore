@@ -68,6 +68,7 @@ type SQL struct {
 
 	FindItemIDByPath string
 	GetItemByPath    string
+	ScanPaths        string
 
 	CleanupExpiredCursors string
 	GetCursor             string

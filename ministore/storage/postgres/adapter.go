@@ -31,6 +31,29 @@ func (a *Adapter) IndexID() string { return "postgres:" + a.Schema }
 
 func (a *Adapter) Close() error { return nil }
 
+// SchemaEmpty reports whether the configured schema has no tables. It does not
+// create the schema and is used to distinguish a missing index from an invalid
+// or temporarily unavailable existing target.
+func (a *Adapter) SchemaEmpty(ctx context.Context) (bool, error) {
+	if a.Schema == "" || !schemaNameRe.MatchString(a.Schema) {
+		return false, fmt.Errorf("invalid postgres schema name %q (must match %s)", a.Schema, schemaNameRe.String())
+	}
+	cfg, err := pgx.ParseConfig(a.DSN)
+	if err != nil {
+		return false, err
+	}
+	connection, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		return false, err
+	}
+	defer connection.Close(ctx)
+	var tables int
+	if err := connection.QueryRow(ctx, `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=$1`, a.Schema).Scan(&tables); err != nil {
+		return false, err
+	}
+	return tables == 0, nil
+}
+
 func (a *Adapter) SQL() storage.SQL { return SQLTemplates }
 
 func (a *Adapter) FTS() storage.FTS { return FTS{} }
