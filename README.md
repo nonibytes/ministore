@@ -14,6 +14,7 @@ This is the Go implementation. See also: [Rust implementation](https://github.co
 - **Schema Management**: Define schemas with multiple field types and multi-value support
 - **Batch Operations**: Transactional batch inserts and deletes
 - **Multi-Backend**: SQLite (default) and PostgreSQL support
+- **Open Knowledge Format**: Validate and synchronize OKF v0.2 bundles into searchable indexes
 - **Zero CGO by Default**: Pure Go SQLite driver for easy cross-compilation
 - **CLI & Library**: Use as a Go library or standalone command-line tool
 
@@ -381,7 +382,8 @@ ministore/
 
 ## Open Knowledge Format (OKF)
 
-Validate an OKF v0.2 bundle without opening an index, then synchronize it atomically:
+Validate an OKF v0.2 bundle, synchronize it into a dedicated index, and search
+its concepts with ordinary MiniStore queries:
 
 ```bash
 ministore okf validate --bundle ./knowledge --format json
@@ -389,23 +391,15 @@ ministore okf sync --bundle ./knowledge --index knowledge.db
 ministore okf sync --bundle ./knowledge --index knowledge.db --dry-run
 ```
 
-`--strict` treats advisory warnings as a failed validation. Synchronization uses a
-private temporary SQLite stage and retains one concept projection at a time; set
-the operating system's standard temporary-directory environment variable when the
-default disk is too small. The stage contains source text and is owner-only on
-supported platforms, and is removed on success and handled failure. The indexed
-`raw_document` field preserves the exact source, including unknown YAML keys and
-line endings.
+`--strict` makes warnings fail validation and block synchronization. Synchronization
+is atomic, preserves the exact source in `raw_document`, and uses disk-backed
+staging instead of retaining the bundle in RAM. The target is dedicated to one
+bundle: paths absent from the bundle are deleted.
 
-An existing target must have the canonical OKF schema. A selected compatible OKF
-index is treated as dedicated to that bundle: paths absent from the bundle are
-deleted. Rebuild by deleting the dedicated index and running `okf sync` again.
-PostgreSQL synchronization uses one potentially long transaction; provision WAL
-and temporary disk for the bundle size and serialize concurrent sync jobs.
-
-After sync, use ordinary queries such as `trust_tier:human-reviewed`,
-`tags:finance`, or `backlinks:"/metrics/revenue"`. The complete contract and
-security model are in [docs/DESIGN.okf.md](docs/DESIGN.okf.md).
+See the [OKF user guide](docs/okf.md) for bundle structure, commands, reports,
+projected fields, queries, links, library integration, storage behavior, and
+troubleshooting. The separate [engineering design](docs/DESIGN.okf.md) defines the
+implementation contract.
 
 ## Running Tests
 
