@@ -1,13 +1,9 @@
-# Open Knowledge Format user guide
+# Open Knowledge Format user guide for Go
 
-MiniStore can validate an Open Knowledge Format (OKF) v0.2 bundle and synchronize
-its concepts into a searchable MiniStore index. The source Markdown remains the
-authority. The index is a deterministic projection that can be rebuilt whenever
-the bundle changes.
-
-This guide covers the Go and Rust implementations. Their OKF validation,
-projections, hashes, SQLite indexes, JSON reports, and query behavior are
-compatible. The Go CLI additionally supports PostgreSQL targets.
+The Go implementation of MiniStore can validate an Open Knowledge Format (OKF)
+v0.2 bundle and synchronize its concepts into a searchable MiniStore index. The
+source Markdown remains the authority. The index is a deterministic projection
+that can be rebuilt whenever the bundle changes.
 
 ## What MiniStore does
 
@@ -21,8 +17,7 @@ MiniStore's OKF support:
 - derives trust, lifecycle, provenance, and computation fields;
 - creates a fixed, searchable MiniStore projection;
 - synchronizes additions, edits, backlink-only changes, renames, and deletions in
-  one target transaction; and
-- produces compatible results in Go and Rust.
+  one target transaction.
 
 MiniStore does not fetch external resources, execute computations, run executors
 or attesters, or treat trust metadata as authorization. Those values are validated
@@ -174,12 +169,11 @@ more precise without changing a code's meaning.
 | `OKF350`–`OKF360` | Attested Computation contracts and source footnotes |
 | `OKF400`–`OKF402` | Missing links, root escapes, and unsafe percent encoding |
 
-The public Go `FindingCode` constants and Rust `FindingCode` enum contain the full
-catalog.
+The public Go `FindingCode` constants contain the full catalog.
 
 ## Synchronize a bundle
 
-SQLite in Go or Rust:
+SQLite:
 
 ```text
 ministore okf sync --bundle DIR --index INDEX
@@ -402,8 +396,6 @@ executes or fetches computation content.
 The CLI creates a missing index. The library synchronization functions require an
 already open index whose schema exactly equals the canonical OKF projection schema.
 
-### Go
-
 ```go
 package main
 
@@ -461,53 +453,6 @@ Use `ministore.Open` instead of `ministore.Create` for an existing target. Go's
 
 `okf.WalkProjections` streams canonical projections in source-path order when an
 application needs the projection without synchronization.
-
-### Rust
-
-Add the OKF crate alongside `ministore` in the workspace or application:
-
-```toml
-[dependencies]
-ministore = { path = "../ministore-rust/crates/ministore" }
-ministore-okf = { path = "../ministore-rust/crates/ministore-okf" }
-```
-
-```rust
-use std::path::Path;
-
-use ministore::{Index, IndexOptions};
-use ministore_okf::{
-    projection_schema, sync, validate_bundle, SyncOptions, ValidateOptions,
-};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let bundle = Path::new("./knowledge");
-
-    let summary = validate_bundle(bundle, &ValidateOptions::default(), |finding| {
-        println!("{:?} {}: {}", finding.severity, finding.path, finding.message);
-        Ok(())
-    })?;
-    if !summary.ok() {
-        return Err("bundle is not conformant".into());
-    }
-
-    let index = Index::create(
-        "knowledge.db",
-        projection_schema(),
-        IndexOptions::default(),
-    )?;
-
-    let report = sync(bundle, &index, &SyncOptions::default())?;
-    println!(
-        "added={} updated={} deleted={}",
-        report.added, report.updated, report.deleted
-    );
-    Ok(())
-}
-```
-
-Use `Index::open` for an existing target. `walk_projections` streams projections
-without returning a bundle-sized collection.
 
 ## Storage, memory, and failure behavior
 
